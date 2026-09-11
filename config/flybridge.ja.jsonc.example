@@ -1,0 +1,45 @@
+{
+  // `--config` はこのファイルを選びます。対応する JSONC の値を上書きするのは
+  // start/doctor の `--mode` と start の `--queue-observer`/`--no-queue-observer` だけです。
+  "default_mode": "orchestrated",
+  "state_dir": "~/.local/state/flybridge",
+  "orca": {
+    // Linux で Orca 管理外の端末から使う場合は `orca-ide` を指定します。
+    "executable": "orca-ide",
+    "agents": {
+      "single": "codex",
+      "manager": "codex",
+      "worker": "codex",
+      "reviewer": "codex"
+    }
+  },
+  "skills": {
+    // source には文書、catalog directory、または glob パターンを指定できます。
+    // `~` と directory のシンボリックリンクは解決します。directory は配下の
+    // `SKILL.md` をソート順に展開します。同梱の案内は `/path/to/flybridge/skills` です。
+    "sources": [],
+    "roles": { "single": [], "manager": [], "worker": [], "reviewer": [] },
+    // 英語の prompt は、エージェントへこの応答言語名を指示します。
+    "response_language": "Japanese",
+    // 言語固有の overlay を注入する場合は、その絶対パスを列挙します。
+    "language_specific": ["/path/to/flybridge/language_specific/japanese.md"]
+  },
+  "queue": {
+    // root workflow は、Flybridge が所有する可視の Orca observer 端末を開けます。
+    "observer": true,
+    // ここに列挙した名前は、role prompt へ `flybridge queue acquire|inspect|release`
+    // として注入されます。エージェントは起動時と同じ `--config` を渡してください。
+    "resources": []
+  },
+  // GitHub Project 連携を使わない場合は `enabled` を false のままにします。
+  "github": {
+    "enabled": false,
+    "owner": "example-owner",
+    "owner_type": "user",
+    "project_number": 1,
+    "status_field": "Status",
+    "todo_status": "Todo",
+    "priority_field": "Priority",
+    "priority_values": ["Critical", "High"]
+  }
+}

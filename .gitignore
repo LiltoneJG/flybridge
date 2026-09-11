@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+/results.sarif
+.agents/
+.claude/
+.codex/
+# User configuration is local-only. Committed templates use the `.example`
+# suffix and therefore remain trackable.
+config/*.jsonc

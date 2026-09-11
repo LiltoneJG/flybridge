@@ -1,0 +1,45 @@
+{
+  // --config selects this file. Only start/doctor --mode and start
+  // --queue-observer/--no-queue-observer override corresponding JSONC values.
+  "default_mode": "orchestrated",
+  "state_dir": "~/.local/state/flybridge",
+  "orca": {
+    // On Linux outside an Orca-managed terminal, use `orca-ide`.
+    "executable": "orca-ide",
+    "agents": {
+      "single": "codex",
+      "manager": "codex",
+      "worker": "codex",
+      "reviewer": "codex"
+    }
+  },
+  "skills": {
+    // Sources may be documents, catalog directories, or glob patterns.
+    // Paths expand `~` and directory symbolic links. Directories expand to
+    // sorted `SKILL.md` files. To use bundled guidance, add `/path/to/flybridge/skills`.
+    "sources": [],
+    "roles": { "single": [], "manager": [], "worker": [], "reviewer": [] },
+    // The English prompt asks the agent to use this response language.
+    "response_language": "English",
+    // Enable language-specific overlays by listing their absolute paths here.
+    "language_specific": []
+  },
+  "queue": {
+    // Root workflows can open a visible, Flybridge-owned Orca observer terminal.
+    "observer": true,
+    // Names listed here inject `flybridge queue acquire|inspect|release` into
+    // role prompts. Agents should pass the same `--config` used to start.
+    "resources": []
+  },
+  // Keep `enabled` false when GitHub Project integration is not wanted.
+  "github": {
+    "enabled": false,
+    "owner": "example-owner",
+    "owner_type": "user",
+    "project_number": 1,
+    "status_field": "Status",
+    "todo_status": "Todo",
+    "priority_field": "Priority",
+    "priority_values": ["Critical", "High"]
+  }
+}
