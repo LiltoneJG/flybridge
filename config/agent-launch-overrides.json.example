@@ -1,0 +1,20 @@
+{
+    "version": 1,
+    "agents": {
+        "cursor": {
+            "executables": ["cursor-agent", "agent"],
+            "arguments": ["--trust", "--yolo"],
+            "model_arguments": ["--model", "{model}"],
+            "builtin_tui": true,
+            "builtin_models": ["auto"]
+        },
+        "codex": {
+            "executables": ["codex"],
+            "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
+            "model_arguments": ["--model", "{model}"],
+            "prompt_arguments": ["{prompt}"],
+            "builtin_tui": false,
+            "builtin_models": []
+        }
+    }
+}

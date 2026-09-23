@@ -1,0 +1,45 @@
+# Keep this file aligned with CI: `uv run pre-commit run --all-files`.
+default_language_version:
+  python: python3
+
+repos:
+  - repo: local
+    hooks:
+      - id: strip-image-metadata
+        name: remove image metadata
+        entry: python scripts/strip_image_metadata.py
+        language: system
+        types: [file]
+        files: (?i)\.(gif|jpe?g|png|webp)$
+      - id: markdown-table-format
+        name: format Markdown tables
+        entry: python scripts/format_markdown_tables.py
+        language: system
+        types: [markdown]
+      - id: public-source-privacy-audit
+        name: audit public source for private identifiers
+        entry: python scripts/public_audit.py --audit-config .private-audit.yaml
+        language: system
+        pass_filenames: false
+        always_run: true
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-case-conflict
+      - id: check-merge-conflict
+        args: ["--assume-in-merge"]
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.6
+    hooks:
+      - id: ruff-check
+      - id: ruff-format

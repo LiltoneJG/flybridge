@@ -1,0 +1,104 @@
+{
+  "default_mode": "orchestrated",
+  "state_dir": "~/.local/state/flybridge",
+
+  "orca": {
+    "launch_overrides": "agent-launch-overrides.json",
+
+    // Linux = `orca-ide`, macOS: `orca`
+    "executable": "orca-ide",
+
+    // Specify the agent and model.
+    // Set model to null to launch without specifying a model.
+    // reviewer may be one value or a list.
+    // To list available models:
+    // - Claude: (no official command)
+    // - Codex: `codex debug models | jq -r '.models[].slug'`
+    // - Cursor: `agent models`
+    // - Antigravity: `agy models`
+    "agents": {
+      "single": { "agent": "cursor", "model": "auto" },
+      "manager": { "agent": "cursor", "model": "auto" },
+      "worker": { "agent": "cursor", "model": "auto" },
+      "reviewer": [
+        { "agent": "cursor", "model": "auto" },
+        { "agent": "cursor", "model": "claude-opus-5-low" },
+        { "agent": "codex", "model": null }
+      ]
+    }
+  },
+
+  "skills": {
+    // Prompts are always in English, but
+    // agent responses use the language specified here.
+    "response_language": "English",
+
+    // Skill sources may be documents, catalog directories, or glob patterns.
+    // `~` and directory symlinks are resolved.
+    "sources": [],
+    "operator": [],
+    "roles": { "single": [], "manager": [], "worker": [], "reviewer": [] }
+  },
+  "queue": {
+    // Root workflows can open a visible, Flybridge-owned Orca observer terminal.
+    // That observer streams events and notifies the parked agent after FIFO promotion.
+    "observer": true,
+    // Names listed here inject `flybridge queue acquire|release` into
+    // role prompts. Waiting agents stop until the observer names a lease-id.
+    // Agents should pass the same `--config` used to start.
+    "resources": [],
+    // Kept for existing configs. The supervisor does not expire healthy waiters.
+    "wait_timeout_seconds": 3600,
+    // Age for operator `queue recover`. Live holders are not expired by the supervisor.
+    "lease_timeout_seconds": 3600
+  },
+  "timeouts": {
+    "role_seconds": 3600
+  },
+  "delivery": {
+    "orchestrated": "manager_worktree",
+    "force_push": false
+  },
+  "orchestration": {
+    // A changes-requested review automatically returns to the worker.
+    "max_review_cycles": 3,
+    // Transient coordinator failures survive restart and use bounded exponential backoff.
+    "max_coordinator_errors": 5,
+    "retry_initial_seconds": 1,
+    "retry_max_seconds": 30
+  },
+  "reconcile": {
+    "auto_before_workflow_commands": true,
+    "missing_observations": 2,
+    "missing_grace_seconds": 300,
+    "event_retention": 10000,
+    // Directory names or globs omitted from reconcile, inventory, and board screen.
+    // Directory names match a path component exactly; globs match a path component or the
+    // resolved POSIX path (`*-private` matches `flybridge-private`).
+    "exclude_worktrees": [
+      "flybridge",
+      "*-private"
+    ]
+  },
+  // Keep `enabled` false when GitHub Project integration is not wanted.
+  // `login` is the default `--assignee` for `board screen`. Status and
+  // priority values are CLI flags, not configuration.
+  // `skip_repositories` omits GitHub nameWithOwner values or prefixes from inventory queries.
+  "github": {
+    "enabled": false,
+    "login": "example-user",
+    "skip_repositories": [
+      "flybridge-review-fixture/",
+      "flybridge-acceptance/"
+    ],
+    "boards": [
+      {
+        "owner": "example-owner",
+        "owner_type": "user",
+        "project_number": 1,
+        "status_field": "Status",
+        "priority_field": "Priority"
+      }
+    ]
+  }
+}

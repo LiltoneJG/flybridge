@@ -1,0 +1,104 @@
+{
+  "default_mode": "orchestrated",
+  "state_dir": "~/.local/state/flybridge",
+
+  "orca": {
+    "launch_overrides": "agent-launch-overrides.json",
+
+    // Linux = `orca-ide`, macOS: `orca`
+    "executable": "orca-ide",
+
+    // エージェントとモデルを指定します。
+    // モデルを null にすると指定なしで起動します。
+    // reviewer は単一または配列です。
+    // モデル一覧確認方法：
+    // - Claude: （正式なコマンドなし）
+    // - Codex: `codex debug models | jq -r '.models[].slug'`
+    // - Cursor: `agent models`
+    // - Antigravity: `agy models`
+    "agents": {
+      "single": { "agent": "cursor", "model": "auto" },
+      "manager": { "agent": "cursor", "model": "auto" },
+      "worker": { "agent": "cursor", "model": "auto" },
+      "reviewer": [
+        { "agent": "cursor", "model": "auto" },
+        { "agent": "cursor", "model": "claude-opus-5-low" },
+        { "agent": "codex", "model": null }
+      ]
+    }
+  },
+
+  "skills": {
+    // prompt は常に英語ですが、
+    // エージェントからの返答はここで指定した言語になります。
+    "response_language": "Japanese",
+
+    // スキルソースには文書、catalog directory、または glob パターンを指定できます。
+    // `~` と directory のシンボリックリンクは解決します。
+    "sources": [],
+    "operator": [],
+    "roles": { "single": [], "manager": [], "worker": [], "reviewer": [] },
+  },
+  "queue": {
+    // root workflow は、Flybridge が所有する可視の Orca observer 端末を開けます。
+    // observer はイベントを表示し、FIFO 昇格後に待機中の agent へ lease-id を送ります。
+    "observer": true,
+    // ここに列挙した名前は、role prompt へ `flybridge queue acquire|release`
+    // として注入されます。waiting の agent は observer の lease-id 通知まで停止します。
+    // エージェントは起動時と同じ `--config` を渡してください。
+    "resources": [],
+    // 既存設定互換のため残します。supervisor は healthy waiter を expire しません。
+    "wait_timeout_seconds": 3600,
+    // operator の `queue recover` が使う年齢です。生きている holder は supervisor が expire しません。
+    "lease_timeout_seconds": 3600
+  },
+  "timeouts": {
+    "role_seconds": 3600
+  },
+  "delivery": {
+    "orchestrated": "manager_worktree",
+    "force_push": false
+  },
+  "orchestration": {
+    // changes-requested の場合に worker へ戻す最大 review cycle 数です。
+    "max_review_cycles": 3,
+    // 一時的な coordinator 障害は再起動後も引き継ぎ、上限付き指数 backoff で再試行します。
+    "max_coordinator_errors": 5,
+    "retry_initial_seconds": 1,
+    "retry_max_seconds": 30
+  },
+  "reconcile": {
+    "auto_before_workflow_commands": true,
+    "missing_observations": 2,
+    "missing_grace_seconds": 300,
+    "event_retention": 10000,
+    // ディレクトリ名または glob。reconcile / inventory / board screen から除外する。
+    // ディレクトリ名は path の component 完全一致。glob は component または解決済み POSIX path
+    // にマッチする（`*-private` は `flybridge-private` に当たる）。
+    "exclude_worktrees": [
+      "flybridge",
+      "*-private"
+    ]
+  },
+  // GitHub Project 連携を使わない場合は `enabled` を false のままにします。
+  // `login` は `board screen` の既定 `--assignee` です。Status と Priority の
+  // 値は設定ではなく CLI フラグです。
+  // `skip_repositories` は inventory の GitHub 問い合わせから除外する nameWithOwner または prefix です。
+  "github": {
+    "enabled": false,
+    "login": "example-user",
+    "skip_repositories": [
+      "flybridge-review-fixture/",
+      "flybridge-acceptance/"
+    ],
+    "boards": [
+      {
+        "owner": "example-owner",
+        "owner_type": "user",
+        "project_number": 1,
+        "status_field": "Status",
+        "priority_field": "Priority"
+      }
+    ]
+  }
+}

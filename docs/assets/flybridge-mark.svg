@@ -1,0 +1,47 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 256 256"
+  fill="none"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">Flybridge mark</title>
+  <desc id="description">
+    A right-facing motor yacht with an open flybridge above its enclosed cabin.
+    A low teal canopy and upper deck highlight the elevated helm above a taller
+    blue-gray cabin. The compact profile gives the vessel a grounded stance.
+    Transparent cabin windows and a rising bow keep the silhouette legible at
+    small sizes.
+  </desc>
+
+  <!-- Narrow the superstructure toward its fixed aft edge, clear of the bow. -->
+  <g transform="translate(-7.2 8) scale(0.9 1)">
+    <!-- Swept canopy over the open upper helm. -->
+    <path
+      fill="#64959c"
+      d="M64 76 75 66h62c16 0 25 4 34 12l-14 3c-9-4-17-5-26-5H64Z"
+    />
+
+    <!-- A raked aft support and a low forward windscreen leave the helm open. -->
+    <path
+      fill="#426878"
+      d="M82 76h14l5 12H87l-5-12Zm61 4h14l17 8h-23l-8-8Z"
+    />
+
+    <!-- The projecting upper deck is distinct from the enclosed cabin below. -->
+    <path fill="#64959c" d="M69 87h104l12 10H59l10-10Z" />
+
+    <!-- Two windows are actual cutouts, including on a transparent background. -->
+    <path
+      fill="#426878"
+      fill-rule="evenodd"
+      d="M72 97h93l35 42H48l24-42Zm9 14-10 18h32l4-18H81Zm40 0-4 18h59l-17-18h-38Z"
+    />
+  </g>
+
+  <!-- A long rising sheer and full bow make the vessel read in side profile. -->
+  <path
+    fill="#426878"
+    d="M26 151h101c39 0 75-6 107-16l-13 23c-15 21-35 32-59 32H70c-16 0-27-7-34-20l-10-19Z"
+  />
+</svg>

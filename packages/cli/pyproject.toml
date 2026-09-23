@@ -1,0 +1,23 @@
+[project]
+name = "flybridge-cli"
+version = "1.0.0"
+description = "Unified command line interface for Flybridge"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "flybridge-application",
+    "flybridge-core",
+    "flybridge-orca",
+    "flybridge-github",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+flybridge = "flybridge_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

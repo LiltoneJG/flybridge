@@ -1,0 +1,9 @@
+{
+  // Keep prose unwrapped: editing long Markdown paragraphs is the priority.
+  "globs": ["**/*.md"],
+  "ignores": [".pytest_cache/**"],
+  "config": {
+    "MD013": false,
+    "MD041": false
+  }
+}

@@ -1,0 +1,9 @@
+# Copy this file to `.private-audit.yaml` and replace the example values.
+# Always quote values so YAML does not infer booleans, dates, or other scalar types.
+private_identifiers:
+  # Person names and spelling variants
+  - "Example Person"
+  - "Person Example"
+
+  # Employers and organization names
+  - "Example Employer"

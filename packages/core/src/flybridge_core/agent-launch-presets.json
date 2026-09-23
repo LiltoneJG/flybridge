@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "agents": {
+    "default": {
+      "executables": ["{agent}"],
+      "arguments": [],
+      "model_arguments": ["--model", "{model}"],
+      "builtin_tui": false,
+      "builtin_models": []
+    },
+    "cursor": {
+      "executables": ["cursor-agent", "agent"],
+      "arguments": ["--trust", "--yolo"],
+      "model_arguments": ["--model", "{model}"],
+      "builtin_tui": true,
+      "builtin_models": []
+    },
+    "codex": {
+      "executables": ["codex"],
+      "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
+      "model_arguments": ["--model", "{model}"],
+      "prompt_arguments": ["{prompt}"],
+      "builtin_tui": false,
+      "builtin_models": []
+    },
+    "ollama": {
+      "executables": ["ollama"],
+      "arguments": ["run"],
+      "model_arguments": ["{model}"],
+      "requires_model": true,
+      "builtin_tui": false,
+      "builtin_models": []
+    }
+  }
+}

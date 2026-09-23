@@ -1,0 +1,15 @@
+[project]
+name = "flybridge-application"
+version = "1.0.0"
+description = "Application services for Flybridge workflows"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["flybridge-core"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
