@@ -86,7 +86,7 @@ def test_english_documents_have_japanese_translations() -> None:
     japanese = {
         path.relative_to(ROOT / "docs" / "ja")
         for path in (ROOT / "docs" / "ja").rglob("*.md")
-        if path.name not in {"README.md", "security.md"}
+        if path.name != "README.md"
     }
 
     assert english == japanese
