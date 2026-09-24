@@ -1544,7 +1544,8 @@ def test_board_screen_cli_returns_candidates(tmp_path: Path, capsys, monkeypatch
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **kwargs):
             received.update(kwargs)
@@ -2199,10 +2200,13 @@ def test_board_screen_cli_forwards_filters(tmp_path: Path, capsys, monkeypatch) 
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **kwargs):
             received.update(kwargs)
+            self.seen_status_names = tuple(kwargs.get("statuses") or ())
+            self.seen_priority_names = tuple(kwargs.get("priorities") or ())
             return []
 
     monkeypatch.setattr("flybridge_cli.commands.auxiliary.GitHubProject", FakeProject)
@@ -2230,6 +2234,42 @@ def test_board_screen_cli_forwards_filters(tmp_path: Path, capsys, monkeypatch) 
     assert received["statuses"] == ["Todo"]
     assert received["priorities"] == ["High"]
     assert received["boards"] == ["10"]
+
+
+def test_board_screen_cli_warns_when_status_filter_is_unseen(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.jsonc"
+    write_config(config_path, github=ENABLED_GITHUB)
+
+    class FakeProject:
+        def __init__(self, _config) -> None:
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
+
+        def screen(self, **kwargs):
+            self.seen_status_names = ("In progress",)
+            self.seen_priority_names = ("High",)
+            return []
+
+    monkeypatch.setattr("flybridge_cli.commands.auxiliary.GitHubProject", FakeProject)
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config_path),
+                "board",
+                "screen",
+                "--status",
+                "Done",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 0
+    assert payload["warnings"] == ["no Project Status matched Done; seen: In progress"]
 
 
 def test_prs_screen_cli_lists_authored_pull_requests(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -3855,7 +3895,8 @@ def test_board_screen_with_refs_joins_comment_urls(tmp_path: Path, capsys, monke
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **_kwargs):
             return [
@@ -3965,7 +4006,8 @@ def test_board_screen_with_refs_applies_exclude_name(tmp_path: Path, capsys, mon
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **_kwargs):
             return [

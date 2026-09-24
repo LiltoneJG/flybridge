@@ -108,6 +108,23 @@ def test_screen_filters_status_and_priority_as_or_within_a_field() -> None:
     assert [candidate.number for candidate in candidates] == [1]
 
 
+def test_screen_treats_in_progress_aliases_as_the_same_status() -> None:
+    response = _page(
+        _issue(1, status={"name": "In progress"}, priority={"name": "High"}),
+        _issue(2, status={"name": "Todo"}, priority={"name": "High"}),
+    )
+
+    def runner(arguments, **_kwargs):
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    project = GitHubProject(_config(), runner=runner)
+    candidates = project.screen(assignee=None, statuses=("InProgress",))
+
+    assert [candidate.number for candidate in candidates] == [1]
+    assert project.seen_status_names == ("In progress", "Todo")
+    assert GitHubProject.unmatched_option_filters(("Done",), project.seen_status_names) == ("Done",)
+
+
 def test_disabled_project_integration_cannot_screen() -> None:
     with pytest.raises(GitHubProjectError, match="disabled"):
         GitHubProject(GitHubConfig(False))
