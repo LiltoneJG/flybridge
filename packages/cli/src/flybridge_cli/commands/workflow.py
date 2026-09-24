@@ -16,6 +16,7 @@ from flybridge_application import (
     WorkflowService,
     reconcile_external_state,
     validate_skill_paths,
+    worktree_is_excluded,
 )
 from flybridge_core import (
     MAX_ARTIFACT_BYTES,
@@ -237,7 +238,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
     config = _config(args)
     objective = _resolve_objective(args.objective, args.objective_file)
     objective_source = _objective_source_path(args.objective, args.objective_file)
-    return _start_one(
+    code, _extras = _start_one(
         config,
         repository=args.repository,
         mode=args.mode,
@@ -250,6 +251,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         issue=args.issue,
         print_result=True,
     )
+    return code
 
 
 def _cmd_start_batch(args: argparse.Namespace) -> int:
@@ -269,7 +271,9 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             failed += 1
-            results.append({"index": index, "ok": False, "error": "batch item must be an object"})
+            row = {"index": index, "ok": False, "error": "batch item must be an object"}
+            results.append(row)
+            print(json.dumps(row, separators=(",", ":")), flush=True)
             continue
         try:
             path_value = item.get("path")
@@ -309,7 +313,7 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             issue = item.get("issue")
             if issue is not None and not isinstance(issue, str):
                 raise ValueError("batch item issue must be a string")
-            code = _start_one(
+            code, extras = _start_one(
                 config,
                 repository=Path(path_value),
                 mode=mode,
@@ -325,18 +329,25 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             if code != 0:
                 raise RuntimeError(f"start exited with status {code}")
             ok += 1
-            results.append({"index": index, "ok": True, "path": str(Path(path_value).resolve())})
+            row = {
+                "index": index,
+                "ok": True,
+                "path": str(Path(path_value).resolve()),
+                **extras,
+            }
+            results.append(row)
+            print(json.dumps(row, separators=(",", ":")), flush=True)
         except (ConfigError, OSError, TypeError, ValueError, RuntimeError, sqlite3.Error) as exc:
             failed += 1
-            results.append(
-                {
-                    "index": index,
-                    "ok": False,
-                    "path": item.get("path"),
-                    "error": str(exc),
-                }
-            )
-    print(json.dumps({"ok": ok, "failed": failed, "results": results}, indent=2))
+            row = {
+                "index": index,
+                "ok": False,
+                "path": item.get("path"),
+                "error": str(exc),
+            }
+            results.append(row)
+            print(json.dumps(row, separators=(",", ":")), flush=True)
+    print(json.dumps({"ok": ok, "failed": failed, "results": results}, indent=2), flush=True)
     return 2 if failed else 0
 
 
@@ -366,10 +377,17 @@ def _start_one(
     attach_existing: bool,
     issue: str | None,
     print_result: bool,
-) -> int:
+) -> tuple[int, dict[str, object]]:
     repository = repository.expanduser().resolve()
+    extras: dict[str, object] = {"exclude_warning": False}
     if not repository.is_dir():
         raise ValueError(f"repository does not exist: {repository}")
+    if worktree_is_excluded(str(repository), config.reconcile.exclude_worktrees):
+        extras["exclude_warning"] = True
+        print(
+            f"warning: {repository} matches reconcile.exclude_worktrees; continuing",
+            file=sys.stderr,
+        )
     if not objective.strip():
         raise ValueError("workflow objective is required")
     resolved_mode = _start_mode(config, mode, attach_existing=attach_existing)
@@ -421,8 +439,13 @@ def _start_one(
                 else None,
             )
             if print_result:
-                print(json.dumps({"workflow": asdict(workflow), "new_agent": True}, indent=2))
-            return 0
+                print(
+                    json.dumps(
+                        {"workflow": asdict(workflow), "new_agent": True, **extras},
+                        indent=2,
+                    )
+                )
+            return 0, extras
         stale = service.store.find_unreconciled_by_adapter_reference(worktree_id)
         if stale is not None and stale.status in {
             WorkflowStatus.CANCELLED,
@@ -495,11 +518,12 @@ def _start_one(
                     "workflow": asdict(workflow),
                     "planned_children": [asdict(child) for child in children],
                     "coordinator_terminal": coordinator_handle,
+                    **extras,
                 },
                 indent=2,
             )
         )
-    return 0
+    return 0, extras
 
 
 def _finish_role(service: WorkflowService, client, workflow_id: str) -> None:

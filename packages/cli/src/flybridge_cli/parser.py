@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "JSON array of attach-existing starts; exclusive with the repository argument. "
             "Each item needs path (or repository), objective or objective_file, "
-            "and optional mode, name, and issue"
+            "and optional mode, name, and issue. Prints one JSONL row per item, then a "
+            "summary object"
         ),
     )
     start.add_argument(
