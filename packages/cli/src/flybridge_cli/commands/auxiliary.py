@@ -29,6 +29,7 @@ from flybridge_github import (
     GitHubPullRequestError,
     GitHubPullRequests,
 )
+from flybridge_github.project import GitHubProject as GitHubProjectType
 from flybridge_orca import OrcaClient, agent_cli_is_resolvable
 
 from ..runtime import _adapter, _config
@@ -40,7 +41,8 @@ def handle_board(args: argparse.Namespace) -> int:
         raise ValueError("pass only one of --assignee and --all-assignees")
     config = _config(args)
     assignee = None if args.all_assignees else (args.assignee or config.github.login)
-    candidates = GitHubProject(config.github).screen(
+    project = GitHubProject(config.github)
+    candidates = project.screen(
         boards=args.board or None,
         statuses=args.status,
         priorities=args.priority,
@@ -49,11 +51,30 @@ def handle_board(args: argparse.Namespace) -> int:
     issues = [asdict(candidate) for candidate in candidates]
     failures: list[str] = []
     unmatched: list[dict] = []
+    warnings: list[str] = []
+    unmatched_status = GitHubProjectType.unmatched_option_filters(
+        args.status or (), project.seen_status_names
+    )
+    if unmatched_status:
+        seen = ", ".join(project.seen_status_names) or "(none)"
+        warnings.append(
+            "no Project Status matched " + ", ".join(unmatched_status) + f"; seen: {seen}"
+        )
+    unmatched_priority = GitHubProjectType.unmatched_option_filters(
+        args.priority or (), project.seen_priority_names
+    )
+    if unmatched_priority:
+        seen = ", ".join(project.seen_priority_names) or "(none)"
+        warnings.append(
+            "no Project Priority matched " + ", ".join(unmatched_priority) + f"; seen: {seen}"
+        )
     if args.with_refs:
         issues, unmatched, failures = _attach_refs(config, issues, args)
     payload: dict[str, object] = {"count": len(issues), "issues": issues}
     if args.with_refs:
         payload["unmatched_worktrees"] = unmatched
+    if warnings:
+        payload["warnings"] = warnings
     if failures:
         payload["failures"] = failures
     print(json.dumps(payload, indent=2))

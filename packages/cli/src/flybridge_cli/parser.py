@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "JSON array of attach-existing starts; exclusive with the repository argument. "
             "Each item needs path (or repository), objective or objective_file, "
-            "and optional mode, name, and issue"
+            "and optional mode, name, and issue. Prints one JSONL row per item, then a "
+            "summary object"
         ),
     )
     start.add_argument(
@@ -101,13 +102,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--status",
         action="append",
         default=[],
-        help="Project Status value; repeatable as OR; default: no status filter",
+        help=(
+            "Project Status option name; spaces and case are ignored so InProgress matches "
+            "In progress; repeatable as OR; default: no status filter"
+        ),
     )
     screen.add_argument(
         "--priority",
         action="append",
         default=[],
-        help="Project Priority value; repeatable as OR; default: no priority filter",
+        help=(
+            "Project Priority option name; spaces and case are ignored; repeatable as OR; "
+            "default: no priority filter"
+        ),
     )
     screen.add_argument(
         "--assignee",

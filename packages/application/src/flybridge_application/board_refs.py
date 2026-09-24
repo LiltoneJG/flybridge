@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from flybridge_core import issue_urls_from_text, parse_issue_url
@@ -82,13 +83,17 @@ def _worktree_ref_keys(row: Mapping[str, Any]) -> set[str]:
 def _worktree_payload(row: Mapping[str, Any], reasons: Sequence[str]) -> dict[str, Any]:
     orca = row.get("orca") if isinstance(row.get("orca"), dict) else {}
     git = row.get("git") if isinstance(row.get("git"), dict) else {}
-    return {
+    payload = {
         "path": orca.get("path"),
         "name": orca.get("name"),
         "checkout_repository": git.get("github_repository"),
         "branch": git.get("branch") or orca.get("branch") or "",
         "match": list(reasons),
     }
+    aliases = orca.get("aliases")
+    if isinstance(aliases, list) and aliases:
+        payload["aliases"] = aliases
+    return payload
 
 
 def _issue_url_keys(issue: Mapping[str, Any]) -> set[str]:
@@ -167,7 +172,7 @@ def attach_issue_refs(
     for row in worktrees:
         prepared.append((row, _worktree_issue_keys(row), _worktree_ref_keys(row)))
     attached: list[dict[str, Any]] = []
-    matched_paths: set[str] = set()
+    matched_paths: set[object] = set()
     for issue in issues:
         row = dict(issue)
         url = row.get("url") if isinstance(row.get("url"), str) else ""
@@ -178,7 +183,7 @@ def attach_issue_refs(
         pr_keys = _development_pr_keys(facts)
         branch_keys = _development_branch_keys(facts)
         matches: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
+        seen_paths: set[object] = set()
         for worktree, worktree_issues, worktree_refs in prepared:
             reasons: list[str] = []
             if issue_keys & worktree_issues:
@@ -193,21 +198,28 @@ def attach_issue_refs(
                 continue
             payload = _worktree_payload(worktree, reasons)
             path = payload.get("path")
-            path_key = path if isinstance(path, str) else id(worktree)
+            path_key = _resolved_path_key(path) if isinstance(path, str) else id(worktree)
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
             if isinstance(path, str):
-                matched_paths.add(path)
+                matched_paths.add(path_key)
             matches.append(payload)
         row["worktrees"] = matches
         row["development"] = facts
         attached.append(row)
     unmatched: list[dict[str, Any]] = []
+    seen_unmatched: set[object] = set()
     for worktree, _issues, _refs in prepared:
         payload = _worktree_payload(worktree, ())
         path = payload.get("path")
-        if isinstance(path, str) and path in matched_paths:
+        path_key = _resolved_path_key(path) if isinstance(path, str) else id(worktree)
+        if path_key in matched_paths or path_key in seen_unmatched:
             continue
+        seen_unmatched.add(path_key)
         unmatched.append({key: value for key, value in payload.items() if key != "match"})
     return attached, unmatched
+
+
+def _resolved_path_key(path: str) -> str:
+    return str(Path(path).expanduser().resolve())

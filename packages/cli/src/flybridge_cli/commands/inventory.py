@@ -8,6 +8,7 @@ from flybridge_application import (
     GitWorktreeProbe,
     InventoryWorktree,
     attach_matched_review_facts,
+    collapse_inventory_worktrees,
     collect_inventory,
     filter_github_query_targets,
     format_pull_request_failures,
@@ -50,11 +51,12 @@ def select_listed_worktrees(
     include = resolved_prefixes(getattr(args, "path_prefixes", None) or [])
     exclude = resolved_prefixes(getattr(args, "exclude_prefixes", None) or [])
     names = resolved_names(getattr(args, "exclude_names", None) or [])
-    return [
+    selected = [
         _identity(worktree)
         for worktree in listed
         if path_is_included(worktree.path, include, exclude, names, exclude_patterns)
     ]
+    return collapse_inventory_worktrees(selected)
 
 
 def handle_inventory(args: argparse.Namespace) -> int:

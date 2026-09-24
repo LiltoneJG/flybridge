@@ -19,6 +19,43 @@ from flybridge_orca.client import StartedWorkflow
 ISSUE_URL = "https://github.com/example/repo/issues/1"
 
 
+def _last_json(stdout: str):
+    decoder = json.JSONDecoder()
+    text = stdout.strip()
+    index = 0
+    last = None
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        last, end = decoder.raw_decode(text, index)
+        index = end
+    if last is None:
+        raise AssertionError(f"stdout contained no JSON: {stdout!r}")
+    return last
+
+
+def _batch_rows_and_summary(stdout: str) -> tuple[list[dict], dict]:
+    decoder = json.JSONDecoder()
+    text = stdout.strip()
+    index = 0
+    values: list[object] = []
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        value, end = decoder.raw_decode(text, index)
+        values.append(value)
+        index = end
+    if not values or not isinstance(values[-1], dict):
+        raise AssertionError(f"batch stdout missing summary: {stdout!r}")
+    summary = values[-1]
+    rows = [item for item in values[:-1] if isinstance(item, dict)]
+    return rows, summary
+
+
 def _install_orca(monkeypatch, client_cls) -> None:
     if getattr(client_cls, "verify", None) is None:
         client_cls.verify = lambda self: {"app_version": "test", "skill": "orchestration"}
@@ -1544,7 +1581,8 @@ def test_board_screen_cli_returns_candidates(tmp_path: Path, capsys, monkeypatch
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **kwargs):
             received.update(kwargs)
@@ -1715,6 +1753,96 @@ def test_inventory_cli_applies_configured_exclude_worktrees(
     assert main(["--config", str(config_path), "inventory", "--no-github"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [row["orca"]["name"] for row in payload["worktrees"]] == ["keep"]
+
+
+def test_inventory_cli_collapses_duplicate_checkout_paths(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    repo = tmp_path / "keep"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(["git", "config", "user.email", "a@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+        cwd=repo,
+        check=True,
+    )
+    config_path = tmp_path / "config.jsonc"
+    write_config(config_path, orca={"agents": {"single": "codex"}}, github=ENABLED_GITHUB)
+    listed_calls = {"github": 0}
+
+    class FakeOrca:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def verify(self):
+            return {"app_version": "test", "skill": "orchestration"}
+
+        def list_worktrees(self):
+            from flybridge_orca.client import ListedWorktree
+
+            return (
+                (
+                    ListedWorktree(
+                        "repo::alias-a::" + str(repo),
+                        str(repo),
+                        "alias-a",
+                        "todo",
+                        "",
+                        "main",
+                        None,
+                        None,
+                    ),
+                    ListedWorktree(
+                        "repo::alias-b::" + str(repo),
+                        str(repo),
+                        "alias-b",
+                        "in-progress",
+                        "https://github.com/example/repo/issues/1",
+                        "main",
+                        1,
+                        None,
+                        "github:example/repo",
+                    ),
+                ),
+                False,
+            )
+
+    class FakePullRequests:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def list_open(self, repositories):
+            listed_calls["github"] += 1
+            assert list(repositories) == ["example/repo"]
+            return {}, ()
+
+        def list_by_head(self, repository, head_ref_name):
+            listed_calls["github"] += 1
+            return (), None
+
+        def get(self, repository, number):
+            listed_calls["github"] += 1
+            return None, None
+
+    monkeypatch.setattr("flybridge_cli.runtime.OrcaClient", FakeOrca)
+    monkeypatch.setattr("flybridge_cli.commands.inventory.GitHubPullRequests", FakePullRequests)
+
+    assert main(["--config", str(config_path), "inventory"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["worktrees"]) == 1
+    row = payload["worktrees"][0]["orca"]
+    assert row["name"] == "alias-b"
+    assert row["aliases"] == [
+        {"id": "repo::alias-a::" + str(repo), "name": "alias-a", "workspace_status": "todo"}
+    ]
+    assert listed_calls["github"] == 2
 
 
 def test_inventory_cli_isolates_github_repository_failures(
@@ -2199,10 +2327,13 @@ def test_board_screen_cli_forwards_filters(tmp_path: Path, capsys, monkeypatch) 
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **kwargs):
             received.update(kwargs)
+            self.seen_status_names = tuple(kwargs.get("statuses") or ())
+            self.seen_priority_names = tuple(kwargs.get("priorities") or ())
             return []
 
     monkeypatch.setattr("flybridge_cli.commands.auxiliary.GitHubProject", FakeProject)
@@ -2230,6 +2361,42 @@ def test_board_screen_cli_forwards_filters(tmp_path: Path, capsys, monkeypatch) 
     assert received["statuses"] == ["Todo"]
     assert received["priorities"] == ["High"]
     assert received["boards"] == ["10"]
+
+
+def test_board_screen_cli_warns_when_status_filter_is_unseen(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.jsonc"
+    write_config(config_path, github=ENABLED_GITHUB)
+
+    class FakeProject:
+        def __init__(self, _config) -> None:
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
+
+        def screen(self, **kwargs):
+            self.seen_status_names = ("In progress",)
+            self.seen_priority_names = ("High",)
+            return []
+
+    monkeypatch.setattr("flybridge_cli.commands.auxiliary.GitHubProject", FakeProject)
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config_path),
+                "board",
+                "screen",
+                "--status",
+                "Done",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 0
+    assert payload["warnings"] == ["no Project Status matched Done; seen: In progress"]
 
 
 def test_prs_screen_cli_lists_authored_pull_requests(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -3057,6 +3224,67 @@ def test_attach_existing_can_disable_the_configured_queue_observer(
     assert store.owned_terminal_handles(workflow_id) == ["term-attach", "terminal:coordinator"]
 
 
+def test_attach_existing_warns_when_the_path_is_excluded(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    config_path = tmp_path / "config.jsonc"
+    write_config(
+        config_path,
+        state_dir=tmp_path / "state",
+        orca={"agents": {"single": "codex"}},
+        reconcile={"auto_before_workflow_commands": False, "exclude_worktrees": ["sandbox"]},
+    )
+
+    class FakeOrcaClient:
+        def __init__(self, _executable: str) -> None:
+            pass
+
+        def existing_worktree(self, repository: Path) -> tuple[str, str]:
+            return "repo::" + str(repository), str(repository)
+
+        def attach_new_agent(self, repository, name, mode, agent, prompt, **_kwargs):
+            return StartedWorkflow(
+                name,
+                "repo::" + str(repository),
+                str(repository),
+                "term-attach",
+                mode,
+                owns_worktree=False,
+            )
+
+        def set_lifecycle(self, *_args, **_kwargs):
+            return {"updated": True}
+
+        def close_terminals(self, *_args):
+            return {"closed": True}
+
+        def remove_worktree(self, *_args):
+            raise AssertionError("attach-existing must not remove a worktree")
+
+    _install_orca(monkeypatch, FakeOrcaClient)
+    result = main(
+        [
+            "--config",
+            str(config_path),
+            "workflow",
+            "start",
+            str(sandbox),
+            "--attach-existing",
+            "--objective",
+            "Fix the existing PR.",
+            "--issue",
+            ISSUE_URL,
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert result == 0
+    assert payload["exclude_warning"] is True
+    assert "matches reconcile.exclude_worktrees" in captured.err
+
+
 def test_start_batch_opens_the_configured_queue_observer(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
@@ -3118,7 +3346,7 @@ def test_start_batch_opens_the_configured_queue_observer(
 
     _install_orca(monkeypatch, FakeOrcaClient)
     result = main(["--config", str(config_path), "workflow", "start", "--batch", str(batch)])
-    payload = json.loads(capsys.readouterr().out)
+    payload = _last_json(capsys.readouterr().out)
     store = WorkflowStore(tmp_path / "state")
     workflow = next(item for item in store.active())
     assert result == 0
@@ -3190,7 +3418,7 @@ def test_start_batch_accepts_repository_as_path_alias(tmp_path: Path, capsys, mo
 
     _install_orca(monkeypatch, FakeOrcaClient)
     result = main(["--config", str(config_path), "workflow", "start", "--batch", str(batch)])
-    payload = json.loads(capsys.readouterr().out)
+    payload = _last_json(capsys.readouterr().out)
     assert result == 0
     assert payload["ok"] == 1
     assert payload["failed"] == 0
@@ -3220,7 +3448,7 @@ def test_start_batch_rejects_conflicting_path_and_repository(tmp_path: Path, cap
     )
 
     result = main(["--config", str(config_path), "workflow", "start", "--batch", str(batch)])
-    payload = json.loads(capsys.readouterr().out)
+    payload = _last_json(capsys.readouterr().out)
     assert result == 2
     assert payload["failed"] == 1
     assert "cannot specify both path and repository" in payload["results"][0]["error"]
@@ -3620,12 +3848,17 @@ def test_start_batch_continues_after_a_failed_item(tmp_path: Path, capsys, monke
 
     _install_orca(monkeypatch, FakeOrcaClient)
     result = main(["--config", str(config_path), "workflow", "start", "--batch", str(batch)])
-    payload = json.loads(capsys.readouterr().out)
+    stdout = capsys.readouterr().out
+    rows, payload = _batch_rows_and_summary(stdout)
     assert result == 2
     assert payload["ok"] == 2
     assert payload["failed"] == 1
     assert attached == ["one", "three"]
     assert payload["results"][1]["ok"] is False
+    assert [row["ok"] for row in rows] == [True, False, True]
+    assert rows[0]["index"] == 0
+    assert rows[1]["error"]
+    assert rows[0]["exclude_warning"] is False
 
 
 def test_workflow_proceed_starts_the_worker(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -3855,7 +4088,8 @@ def test_board_screen_with_refs_joins_comment_urls(tmp_path: Path, capsys, monke
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **_kwargs):
             return [
@@ -3965,7 +4199,8 @@ def test_board_screen_with_refs_applies_exclude_name(tmp_path: Path, capsys, mon
 
     class FakeProject:
         def __init__(self, _config) -> None:
-            pass
+            self.seen_status_names = ()
+            self.seen_priority_names = ()
 
         def screen(self, **_kwargs):
             return [

@@ -12,6 +12,7 @@ from flybridge_application.inventory import (
     InventoryWorktree,
     apply_review_facts,
     attach_matched_review_facts,
+    collapse_inventory_worktrees,
     collect_inventory,
     path_is_included,
     pull_request_needs_review_facts,
@@ -229,6 +230,35 @@ def test_worktree_exclusion_matches_directory_name_or_glob_but_not_a_longer_name
     assert worktree_is_excluded(str(sandbox_0), ("*-private",)) is False
     assert path_is_included(str(sandbox), (), (), (), ("sandbox",)) is False
     assert path_is_included(str(sandbox_0), (), (), (), ("sandbox",)) is True
+
+
+def test_collapse_inventory_worktrees_keeps_one_row_and_aliases(tmp_path: Path) -> None:
+    checkout = tmp_path / "same"
+    checkout.mkdir()
+    thin = InventoryWorktree(
+        "id-thin",
+        str(checkout),
+        "thin",
+        "todo",
+        "",
+        {"issues": []},
+    )
+    rich = InventoryWorktree(
+        "id-rich",
+        str(checkout),
+        "rich",
+        "in-progress",
+        "https://github.com/example/repo/issues/1",
+        {"issues": []},
+        1,
+        "github:example/repo",
+    )
+
+    collapsed = collapse_inventory_worktrees((thin, rich))
+
+    assert len(collapsed) == 1
+    assert collapsed[0].identity == "id-rich"
+    assert collapsed[0].aliases == ({"id": "id-thin", "name": "thin", "workspace_status": "todo"},)
 
 
 def test_inventory_matches_open_pull_requests_by_head(tmp_path: Path) -> None:

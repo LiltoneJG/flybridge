@@ -73,8 +73,9 @@
     "missing_grace_seconds": 300,
     "event_retention": 10000,
     // Directory names or globs omitted from reconcile, inventory, and board screen.
-    // Directory names match a path component exactly; globs match a path component or the
-    // resolved POSIX path (`*-private` matches `flybridge-private`).
+    // A name without glob characters matches one path component exactly (`sandbox`
+    // does not exclude `sandbox_0`). Globs match a path component or the resolved
+    // POSIX path (`*-private` matches `flybridge-private`).
     "exclude_worktrees": [
       "flybridge",
       "*-private"

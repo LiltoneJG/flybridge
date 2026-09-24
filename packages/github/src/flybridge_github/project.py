@@ -52,6 +52,8 @@ class GitHubProject:
         self.cli = GitHubCli(executable, user=config.login or None, runner=runner)
         self.executable = self.cli.executable
         self.runner = self.cli.runner
+        self.seen_status_names: tuple[str, ...] = ()
+        self.seen_priority_names: tuple[str, ...] = ()
 
     @staticmethod
     def _single_select_name(value: object, field_name: str) -> str | None:
@@ -74,6 +76,28 @@ class GitHubProject:
         if value.startswith("@") or any(marker in value for marker in _UNSAFE_GH_MARKERS):
             raise GitHubProjectError(f"GitHub Project {field} contains an unsafe gh expansion")
         return value
+
+    @staticmethod
+    def _option_key(value: str) -> str:
+        return "".join(value.split()).casefold()
+
+    @classmethod
+    def _option_matches(cls, actual: str | None, filters: set[str]) -> bool:
+        if not filters:
+            return True
+        if actual is None:
+            return False
+        actual_key = cls._option_key(actual)
+        return any(cls._option_key(item) == actual_key for item in filters)
+
+    @classmethod
+    def unmatched_option_filters(
+        cls, filters: Sequence[str], seen: Sequence[str]
+    ) -> tuple[str, ...]:
+        if not filters:
+            return ()
+        seen_keys = {cls._option_key(name) for name in seen}
+        return tuple(value for value in filters if cls._option_key(value) not in seen_keys)
 
     @staticmethod
     def _assignees(content: dict[str, object]) -> tuple[str, ...]:
@@ -143,11 +167,18 @@ class GitHubProject:
         status_filter = {self._cli_value("status", value) for value in statuses}
         priority_filter = {self._cli_value("priority", value) for value in priorities}
         assignee_filter = None if assignee is None else self._cli_value("assignee", assignee)
+        seen_statuses: list[str] = []
+        seen_priorities: list[str] = []
         candidates: list[Candidate] = []
         for board in self.selected_boards(boards):
-            candidates.extend(
-                self._screen_board(board, status_filter, priority_filter, assignee_filter)
+            board_candidates, board_statuses, board_priorities = self._screen_board(
+                board, status_filter, priority_filter, assignee_filter
             )
+            candidates.extend(board_candidates)
+            seen_statuses.extend(board_statuses)
+            seen_priorities.extend(board_priorities)
+        self.seen_status_names = tuple(dict.fromkeys(seen_statuses))
+        self.seen_priority_names = tuple(dict.fromkeys(seen_priorities))
         return candidates
 
     def _screen_board(
@@ -156,7 +187,7 @@ class GitHubProject:
         status_filter: set[str],
         priority_filter: set[str],
         assignee: str | None,
-    ) -> list[Candidate]:
+    ) -> tuple[list[Candidate], list[str], list[str]]:
         owner_field = "user" if board.owner_type == "user" else "organization"
         query = f"""
         query(
@@ -208,6 +239,8 @@ class GitHubProject:
         }}
         """
         candidates: list[Candidate] = []
+        seen_statuses: list[str] = []
+        seen_priorities: list[str] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
         for _page in range(self._MAX_PAGES):
@@ -258,13 +291,17 @@ class GitHubProject:
             ):
                 raise GitHubProjectError("unexpected GitHub Project response")
             for item in nodes:
-                candidate = self._candidate_from_item(
+                candidate, status, priority = self._candidate_from_item(
                     item, board, status_filter, priority_filter, assignee
                 )
+                if status is not None:
+                    seen_statuses.append(status)
+                if priority is not None:
+                    seen_priorities.append(priority)
                 if candidate is not None:
                     candidates.append(candidate)
             if not page_info.get("hasNextPage"):
-                return candidates
+                return candidates, seen_statuses, seen_priorities
             cursor = page_info.get("endCursor")
             if not isinstance(cursor, str) or not cursor:
                 raise GitHubProjectError("GitHub Project pagination cursor is missing")
@@ -280,24 +317,24 @@ class GitHubProject:
         status_filter: set[str],
         priority_filter: set[str],
         assignee: str | None,
-    ) -> Candidate | None:
+    ) -> tuple[Candidate | None, str | None, str | None]:
         if not isinstance(item, dict):
             raise GitHubProjectError("unexpected GitHub Project item")
         content = item.get("content")
         if content is None:
-            return None
+            return None, None, None
         if not isinstance(content, dict) or not isinstance(content.get("__typename"), str):
             raise GitHubProjectError("unexpected GitHub Project item")
         if content["__typename"] != "Issue":
-            return None
+            return None, None, None
         if "status" not in item or "priority" not in item:
             raise GitHubProjectError("unexpected GitHub Project field values")
         status = self._single_select_name(item.get("status"), board.status_field)
         priority = self._single_select_name(item.get("priority"), board.priority_field)
-        if status_filter and (status is None or status not in status_filter):
-            return None
-        if priority_filter and (priority is None or priority not in priority_filter):
-            return None
+        if not self._option_matches(status, status_filter):
+            return None, status, priority
+        if not self._option_matches(priority, priority_filter):
+            return None, status, priority
         try:
             repository = content["repository"]["nameWithOwner"]
             number = content["number"]
@@ -307,7 +344,7 @@ class GitHubProject:
         except (KeyError, TypeError) as exc:
             raise GitHubProjectError("unexpected eligible GitHub Project issue") from exc
         if assignee is not None and assignee not in assignees:
-            return None
+            return None, status, priority
         if (
             not isinstance(repository, str)
             or not repository
@@ -317,14 +354,18 @@ class GitHubProject:
             or not isinstance(url, str)
         ):
             raise GitHubProjectError("unexpected eligible GitHub Project issue")
-        return Candidate(
-            repository,
-            number,
-            title,
-            url,
+        return (
+            Candidate(
+                repository,
+                number,
+                title,
+                url,
+                status,
+                priority,
+                assignees,
+                board.owner,
+                board.project_number,
+            ),
             status,
             priority,
-            assignees,
-            board.owner,
-            board.project_number,
         )
