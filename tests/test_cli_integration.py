@@ -1718,6 +1718,96 @@ def test_inventory_cli_applies_configured_exclude_worktrees(
     assert [row["orca"]["name"] for row in payload["worktrees"]] == ["keep"]
 
 
+def test_inventory_cli_collapses_duplicate_checkout_paths(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    repo = tmp_path / "keep"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(["git", "config", "user.email", "a@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+        cwd=repo,
+        check=True,
+    )
+    config_path = tmp_path / "config.jsonc"
+    write_config(config_path, orca={"agents": {"single": "codex"}}, github=ENABLED_GITHUB)
+    listed_calls = {"github": 0}
+
+    class FakeOrca:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def verify(self):
+            return {"app_version": "test", "skill": "orchestration"}
+
+        def list_worktrees(self):
+            from flybridge_orca.client import ListedWorktree
+
+            return (
+                (
+                    ListedWorktree(
+                        "repo::alias-a::" + str(repo),
+                        str(repo),
+                        "alias-a",
+                        "todo",
+                        "",
+                        "main",
+                        None,
+                        None,
+                    ),
+                    ListedWorktree(
+                        "repo::alias-b::" + str(repo),
+                        str(repo),
+                        "alias-b",
+                        "in-progress",
+                        "https://github.com/example/repo/issues/1",
+                        "main",
+                        1,
+                        None,
+                        "github:example/repo",
+                    ),
+                ),
+                False,
+            )
+
+    class FakePullRequests:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def list_open(self, repositories):
+            listed_calls["github"] += 1
+            assert list(repositories) == ["example/repo"]
+            return {}, ()
+
+        def list_by_head(self, repository, head_ref_name):
+            listed_calls["github"] += 1
+            return (), None
+
+        def get(self, repository, number):
+            listed_calls["github"] += 1
+            return None, None
+
+    monkeypatch.setattr("flybridge_cli.runtime.OrcaClient", FakeOrca)
+    monkeypatch.setattr("flybridge_cli.commands.inventory.GitHubPullRequests", FakePullRequests)
+
+    assert main(["--config", str(config_path), "inventory"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["worktrees"]) == 1
+    row = payload["worktrees"][0]["orca"]
+    assert row["name"] == "alias-b"
+    assert row["aliases"] == [
+        {"id": "repo::alias-a::" + str(repo), "name": "alias-a", "workspace_status": "todo"}
+    ]
+    assert listed_calls["github"] == 2
+
+
 def test_inventory_cli_isolates_github_repository_failures(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

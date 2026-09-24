@@ -29,6 +29,7 @@ class InventoryWorktree:
     github_hint: dict[str, Any]
     linked_issue: int | None = None
     project_id: str = ""
+    aliases: tuple[dict[str, str], ...] = ()
 
 
 def normalize_ref_name(value: str) -> str:
@@ -72,6 +73,59 @@ def path_is_included(
     if any(name in resolved.parts for name in names):
         return False
     return not worktree_is_excluded(worktree_path, exclude_patterns)
+
+
+def collapse_inventory_worktrees(
+    worktrees: Sequence[InventoryWorktree],
+) -> list[InventoryWorktree]:
+    """Keep one row per resolved checkout; extra Orca cards become aliases."""
+    groups: dict[str, list[InventoryWorktree]] = {}
+    order: list[str] = []
+    for worktree in worktrees:
+        key = str(Path(worktree.path).expanduser().resolve())
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(worktree)
+    collapsed: list[InventoryWorktree] = []
+    for key in order:
+        items = groups[key]
+        if len(items) == 1 and not items[0].aliases:
+            collapsed.append(items[0])
+            continue
+        primary = max(
+            items,
+            key=lambda item: (
+                1 if item.linked_issue is not None else 0,
+                len((item.comment or "").strip()),
+            ),
+        )
+        aliases = [
+            *primary.aliases,
+            *(
+                {
+                    "id": item.identity,
+                    "name": item.name,
+                    "workspace_status": item.workspace_status,
+                }
+                for item in items
+                if item.identity != primary.identity
+            ),
+        ]
+        collapsed.append(
+            InventoryWorktree(
+                primary.identity,
+                primary.path,
+                primary.name,
+                primary.workspace_status,
+                primary.comment,
+                primary.github_hint,
+                primary.linked_issue,
+                primary.project_id,
+                tuple(aliases),
+            )
+        )
+    return collapsed
 
 
 def _under(path: Path, prefix: Path) -> bool:
@@ -229,15 +283,18 @@ def collect_inventory(
             for repo in _state_repositories(state):
                 if repo in unavailable:
                     errors.append(f"GitHub pull requests were unavailable for {repo}")
+        orca: dict[str, Any] = {
+            "id": worktree.identity,
+            "path": worktree.path,
+            "name": worktree.name,
+            "workspace_status": worktree.workspace_status,
+            "comment": worktree.comment,
+            "github_hint": _hint(worktree, repository),
+        }
+        if worktree.aliases:
+            orca["aliases"] = list(worktree.aliases)
         row: dict[str, Any] = {
-            "orca": {
-                "id": worktree.identity,
-                "path": worktree.path,
-                "name": worktree.name,
-                "workspace_status": worktree.workspace_status,
-                "comment": worktree.comment,
-                "github_hint": _hint(worktree, repository),
-            },
+            "orca": orca,
             "git": git_payload,
             "errors": errors,
         }

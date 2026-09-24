@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from flybridge_application.board_refs import attach_issue_refs, worktree_comment_issue_urls
 
 
@@ -158,6 +160,21 @@ def test_board_refs_reports_unmatched_worktrees() -> None:
 
     assert attached[0]["worktrees"] == []
     assert unmatched[0]["path"] == "/tmp/other"
+
+
+def test_board_refs_unmatched_worktrees_are_unique_by_resolved_path(tmp_path: Path) -> None:
+    checkout = tmp_path / "dup"
+    checkout.mkdir()
+    worktrees = [
+        _worktree(path=str(checkout), name="one", branch="unrelated"),
+        _worktree(path=str(checkout), name="two", branch="unrelated"),
+    ]
+    issues = [{"url": "https://github.com/example/tracker/issues/1"}]
+    attached, unmatched = attach_issue_refs(issues, worktrees, {})
+
+    assert attached[0]["worktrees"] == []
+    assert len(unmatched) == 1
+    assert unmatched[0]["name"] == "one"
 
 
 def test_worktree_comment_issue_urls_are_unique() -> None:
