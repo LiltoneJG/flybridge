@@ -76,7 +76,7 @@ sequenceDiagram
     A->>Q: acquire device
     Q-->>A: lease granted
     B->>Q: acquire device
-    Q-->>B: waiting; park
+    Q-->>B: waiting, park
     A->>Q: release lease
     Q->>Q: promote oldest waiter
     Q-->>O: lease granted to B
