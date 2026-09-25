@@ -160,9 +160,12 @@ def _operator_lifecycle(role: WorkflowRole, workflow_id: str, config_path: Path 
             f"`{blocked_command}` and stop. A blocked readiness lets the coordinator close this "
             "role and terminate the run instead of waiting forever. "
             "Waiting on a Flybridge queue resource is not a blocker: report the request-id, remain "
-            "parked, and resume after the lease-id arrives. After the grant, run the interfering "
-            "work and `queue release` immediately. Do not run `role-ready --outcome blocked` for "
-            "queue wait. "
+            "parked, and resume after the lease-id arrives. After the grant, keep the lease "
+            "through operation-specific cleanup and confirmation that the next holder will not "
+            "be affected, then run `queue release`. If cleanup remains unconfirmed, report the "
+            "remaining state and keep the lease; do not claim verification complete or role "
+            "readiness. Do not run "
+            "`role-ready --outcome blocked` for queue wait. "
             "Never create a pull request. Manager and reviewer roles never push. The worker never "
             "pushes; the coordinator pushes the approved tip from the manager worktree."
             f"{parked_manager}"
@@ -375,9 +378,10 @@ def render_start_prompt(
 Resource coordination:
 - The following names identify mutually exclusive resources: {resources}.
 - Before using one, run `{cli} queue acquire <resource> --owner {workflow_id}` once.
-- If the result is granted, run the interfering operation and then `{cli} queue release <resource> --lease <lease-id> --owner {workflow_id}`.
+- The lease covers preparation, the interfering operation, operation-specific cleanup, and confirmation that the next holder can use the resource without interference. Clean up temporary state created or changed by your work on success or failure; do not change unrelated resources. A command exiting alone does not confirm cleanup.
+- If the result is granted, run the interfering operation, complete and confirm cleanup, then `{cli} queue release <resource> --lease <lease-id> --owner {workflow_id}`. Do not claim verification complete before cleanup is confirmed.
 - If the result is waiting, report the request-id and park in this terminal. Do not poll `queue inspect`, run `queue watch`, interpret observer JSON, or run `role-ready --outcome blocked` for the wait.
-- Resume the interfering operation only when a later Flybridge message names the lease-id. After the grant, run the work and `queue release` immediately. Do not close this terminal.
+- Resume the interfering operation only when a later Flybridge message names the lease-id. After the grant, complete and confirm cleanup before `queue release`. If cleanup cannot be confirmed, keep the lease and this terminal available, report the remaining state for operator recovery, and do not claim verification complete or role readiness.
 - Queue cancellation is operator-only. The Flybridge supervisor expires a lease only when its owner is dead.
 """
     continuity = ROLE_BRANCH_CONTINUITY.get(role)
@@ -448,7 +452,11 @@ def render_resume_prompt(
         f"`{_queue_cli(config_path)} queue` with owner `{workflow_id}`: "
         f"{', '.join(resource_names)}. If waiting, report the request-id and park until a "
         "Flybridge message names the lease-id; do not poll inspect or watch, and do not report "
-        "role-ready blocked for the wait. If granted, run the work and release immediately."
+        "role-ready blocked for the wait. Once granted, hold the lease through the work, "
+        "operation-specific cleanup, and confirmation that the next holder will not be "
+        "affected. Release only after cleanup is confirmed. If cleanup cannot be confirmed, "
+        "keep the lease, report the remaining state for operator recovery, and do not claim "
+        "verification complete or role readiness."
         if resource_names
         else ""
     )
@@ -511,7 +519,11 @@ def render_lease_grant_prompt(
         "Flybridge queue notification: your waiting request is now leased. "
         f"Treat this message as the start of the interfering operation for `{resource}`. "
         f"request-id `{request_id.strip()}`; lease-id `{lease_id.strip()}`. "
-        f"Run the work while holding that lease, then `{cli} queue release {resource.strip()} "
-        f"--lease {lease_id.strip()} --owner {workflow_id.strip()}` immediately afterward. "
+        "Hold the lease through the work, operation-specific cleanup, and confirmation that "
+        "the next holder will not be affected. Clean up on success or failure. Release only "
+        f"after cleanup is confirmed with `{cli} queue release {resource.strip()} "
+        f"--lease {lease_id.strip()} --owner {workflow_id.strip()}`. If cleanup cannot be "
+        "confirmed, keep the lease, report the remaining state for operator recovery, and "
+        "do not claim verification complete or role readiness. "
         "Do not acquire again, poll inspect, or run queue watch."
     )

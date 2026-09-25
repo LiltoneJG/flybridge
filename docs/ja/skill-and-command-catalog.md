@@ -8,7 +8,7 @@ Flybridge に含めるのは、再利用可能な公開 guidance だけです。
 
 | パス                                    | 目的                                                                                                                                                                                                                                                 |
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `skills/resource-coordination/SKILL.md` | 名前付き FIFO resource を一度 acquire し、lease ID の通知を待つ                                                                                                                                                                                      |
+| `skills/resource-coordination/SKILL.md` | 名前付き FIFO resource を一度 acquire し、必要なら lease ID の通知を待ち、後片付けの確認まで lease を保持する                                                                                                                                        |
 | `skills/role-lifecycle/SKILL.md`        | orchestrated role は artifact を保存して `role-ready` を通知し、queue wait は駐車である。single role は検証後に 1 回 push して停止する。coordinator が承認済み tip を harvest / delivery-check / fast-forward push し、所有する child を retire する |
 
 同梱の `SKILL.md` 文書を検出するには、`skills.sources` に `skills/` の絶対パス、または `/path/to/flybridge/skills/*/SKILL.md` のような glob を指定します。外部 skill の path では `~` とディレクトリのシンボリックリンクを展開します。

@@ -115,6 +115,7 @@ stateDiagram-v2
 - `workflow status` は永続化された observer policy、所有する observer handle、Orca に到達できるときの owner terminal の有効性、Flybridge が最後に観測した termination を報告します。Flybridge の外で停止した observer は、Orca が owner terminal を invalid と報告しない限り確定的な live-state change ではありません。
 - root、launch、advance された workflow は、JSONC または `workflow start` の CLI override で有効なら observer を開きます。observer 起動失敗はその workflow を failed にし、記録された所有 terminal を閉じます。resume は初回 launch 時の flag ではなく、現在の `queue.observer` 設定に従います。
 - caller は相互に干渉する任意の process に resource 名を付けます。queue は verification のような特殊 category を encode しません。
+- role の guidance では、lease は準備、干渉する処理、処理に応じた後片付け、次の利用者に干渉しないことの確認までを含みます。成功時も失敗時も必要な後片付けは role が判断し、無関係な資源には触れません。確認後にだけ release し、確認できなければ lease を保持して残存状態を operator に報告し、検証完了や role ready と宣言しません。これは agent 向けの指示であり、queue 側の cleanup 検査ではありません。owner が死んだ場合の回収では、外部資源が残っていても次の waiter が昇格し得ます。
 - 設定された resource 名は、`--config` と `--owner` を含む CLI acquire/release command とともに role prompt に含まれます。waiting caller は request identifier を報告して停止します。observer は FIFO 昇格後に lease identifier を伝えます。CLI inspect と release には永続的な request owner が必要です。
 - `queue.resources` は agent が調整すべき名前を prompt に挿入する一覧です。queue 自体は任意の resource 名を受け付けます。
 - queue connection は SQLite lock の待ち時間を制限し、短時間の CLI 競合によって FIFO 順が暗黙に破られないようにします。

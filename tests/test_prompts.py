@@ -212,6 +212,12 @@ def test_prompt_includes_resource_coordination_only_when_configured() -> None:
     assert "until it is leased" not in prompt
     assert "queue watch" in prompt
     assert "queue release" in prompt
+    assert "operation-specific cleanup" in prompt
+    assert "on success or failure" in prompt
+    assert "complete and confirm cleanup" in prompt
+    assert "keep the lease" in prompt
+    assert "Do not claim verification complete before cleanup is confirmed" in prompt
+    assert "`queue release` immediately" not in prompt
     assert "--owner workflow-123" in prompt
     assert "report the request-id and park" in prompt
     assert "role-ready --outcome blocked" in prompt
@@ -225,6 +231,18 @@ def test_prompt_includes_resource_coordination_only_when_configured() -> None:
         skill_paths=(),
     )
     assert "Resource coordination:" not in without_resources
+
+    worker = render_start_prompt(
+        objective="Run the checks.",
+        mode="orchestrated",
+        role="worker",
+        response_language="English",
+        skill_paths=(),
+        workflow_id="worker-123",
+        resource_names=("behavioral-verification",),
+    )
+    assert "complete and confirm cleanup" in worker
+    assert "do not claim verification complete or role readiness" in worker
 
 
 def test_prompt_includes_config_path_in_queue_commands(tmp_path: Path) -> None:
@@ -253,6 +271,8 @@ def test_prompt_includes_config_path_in_queue_commands(tmp_path: Path) -> None:
     assert f"{cli} queue acquire" in prompt
     assert f"{cli} queue" in resume
     assert "do not poll inspect" in resume
+    assert "Release only after cleanup is confirmed" in resume
+    assert "keep the lease" in resume
     assert "Flybridge MCP" not in prompt
     assert "Flybridge MCP" not in resume
 
@@ -300,6 +320,10 @@ def test_lease_grant_prompt_names_the_lease_and_forbids_polling(tmp_path: Path) 
     assert "now leased" in prompt
     assert "lease-id `lease-1`" in prompt
     assert f"{cli} queue release heavy-check --lease lease-1 --owner workflow-123" in prompt
+    assert "Release only after cleanup is confirmed" in prompt
+    assert "on success or failure" in prompt
+    assert "keep the lease" in prompt
+    assert "do not claim verification complete or role readiness" in prompt
     assert "Do not acquire again" in prompt
 
 
