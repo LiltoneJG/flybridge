@@ -134,4 +134,4 @@ uv run pre-commit run --all-files
 uv run python scripts/test.py -q
 ```
 
-CI は secret scan、pre-commit、テスト、package build を実行します。ローカルで pre-commit を実行する前に `.private-audit.yaml.example` を gitignore 対象の `.private-audit.yaml` にコピーしてください。ブランド画像は ImageMagick と `uv run python scripts/generate_brand_images.py` で正本の SVG から生成します。ルートの [LICENSE](../../LICENSE) は MIT です。
+CI は secret scan、pre-commit、テスト、package build を実行します。pre-commit の Mermaid 描画チェックには Node.js 22.13 以降が必要です。ローカルで pre-commit を実行する前に `.private-audit.yaml.example` を gitignore 対象の `.private-audit.yaml` にコピーしてください。ブランド画像は ImageMagick と `uv run python scripts/generate_brand_images.py` で正本の SVG から生成します。ルートの [LICENSE](../../LICENSE) は MIT です。

@@ -16,6 +16,12 @@ repos:
         entry: python scripts/format_markdown_tables.py
         language: system
         types: [markdown]
+      - id: check-mermaid
+        name: render Mermaid diagrams
+        entry: python scripts/check_mermaid.py
+        language: system
+        types: [markdown]
+        require_serial: true
       - id: public-source-privacy-audit
         name: audit public source for private identifiers
         entry: python scripts/public_audit.py --audit-config .private-audit.yaml
