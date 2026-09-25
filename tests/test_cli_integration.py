@@ -815,6 +815,54 @@ def test_workflow_status_reports_persisted_observer_diagnostics(tmp_path: Path, 
     }
 
 
+def test_old_live_lease_is_visible_without_releasing_or_reordering_it(
+    tmp_path: Path, capsys
+) -> None:
+    config_path = tmp_path / "config.jsonc"
+    state_dir = tmp_path / "state"
+    write_config(
+        config_path,
+        state_dir=state_dir,
+        queue={"observer": False, "resources": ["heavy-check"], "lease_timeout_seconds": 1},
+    )
+    store = WorkflowStore(state_dir)
+    queue = ResourceQueue(state_dir)
+    owners = []
+    for name in ("holder", "waiter"):
+        workflow = store.create(tmp_path, "single", name, "Run a check.")
+        store.transition(workflow.id, "starting")
+        store.transition(workflow.id, "running")
+        owners.append(workflow.id)
+    lease = queue.acquire("heavy-check", owners[0])
+    waiter = queue.acquire("heavy-check", owners[1])
+    with queue._connect() as connection:
+        connection.execute(
+            "UPDATE queue_requests SET updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", lease.request_id),
+        )
+
+    assert main(["--config", str(config_path), "queue", "status", "--details"]) == 0
+    detailed = json.loads(capsys.readouterr().out)
+    assert [item["request_id"] for item in detailed["requests"]] == [
+        lease.request_id,
+        waiter.request_id,
+    ]
+    assert detailed["requests"][0]["owner"] == owners[0]
+    assert detailed["requests"][0]["lease_id"] == lease.lease_id
+    assert detailed["requests"][0]["attention_required"] is True
+    assert detailed["requests"][1]["attention_required"] is False
+    assert detailed["attention_after_seconds"] == 1
+
+    assert main(["--config", str(config_path), "workflow", "status", owners[0]]) == 0
+    workflow_status = json.loads(capsys.readouterr().out)
+    assert workflow_status["resource_queue"]["attention_required"] is True
+    assert workflow_status["resource_queue"]["attention_after_seconds"] == 1
+    assert workflow_status["resource_queue"]["requests"][0]["request_id"] == lease.request_id
+    assert queue.inspect(lease.request_id)["status"] == "leased"
+    assert queue.inspect(waiter.request_id)["status"] == "waiting"
+    assert queue.release(lease.lease_id or "", owner=owners[0]) == waiter.request_id
+
+
 @pytest.mark.parametrize("interval", ["0", "-1", "nan", "inf", "-inf"])
 def test_queue_watch_rejects_invalid_numeric_intervals_before_output(
     tmp_path: Path, capsys, interval: str

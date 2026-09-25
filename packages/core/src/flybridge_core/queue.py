@@ -380,6 +380,48 @@ class ResourceQueue:
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(query, params)]
 
+    def active_requests(
+        self,
+        *,
+        resource: str | None = None,
+        owners: Iterable[str] | None = None,
+        attention_after_seconds: float,
+    ) -> list[dict[str, object]]:
+        """Describe active requests without treating age as permission to release."""
+        self._require_positive_age(attention_after_seconds)
+        if resource is not None and (not isinstance(resource, str) or not resource.strip()):
+            raise ValueError("resource must be a non-empty string")
+        owner_filter = tuple(dict.fromkeys(owners)) if owners is not None else None
+        if owner_filter == ():
+            return []
+        query = """
+            SELECT id AS request_id, resource, owner, status, created_at, updated_at
+            FROM queue_requests WHERE status IN ('waiting', 'leased')
+        """
+        params: list[object] = []
+        if resource is not None:
+            query += " AND resource = ?"
+            params.append(resource.strip())
+        if owner_filter is not None:
+            query += f" AND owner IN ({','.join('?' for _ in owner_filter)})"
+            params.extend(owner_filter)
+        query += " ORDER BY resource, CASE status WHEN 'leased' THEN 0 ELSE 1 END, created_at, id"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        now = datetime.now(UTC)
+        result: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            since = item["updated_at"] if item["status"] == "leased" else item["created_at"]
+            age_seconds = max(0.0, (now - datetime.fromisoformat(str(since))).total_seconds())
+            item["lease_id"] = item["request_id"] if item["status"] == "leased" else None
+            item["age_seconds"] = age_seconds
+            item["attention_required"] = (
+                item["status"] == "leased" and age_seconds >= attention_after_seconds
+            )
+            result.append(item)
+        return result
+
     def owner_requests(self, owner: str) -> list[dict[str, object]]:
         """Return this owner's waiting and leased requests."""
         if not isinstance(owner, str) or not owner.strip():

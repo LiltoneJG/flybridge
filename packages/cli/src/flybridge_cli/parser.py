@@ -76,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status = queue_sub.add_parser("status", help="summarize resource queue states")
     status.add_argument("resource", nargs="?", help="optional resource name")
+    status.add_argument(
+        "--details",
+        action="store_true",
+        help="include active requests and lease-age attention hints",
+    )
     inspect = queue_sub.add_parser("inspect", help="inspect one queue request")
     inspect.add_argument("request_id", help="queue request identifier")
     inspect.add_argument("-o", "--owner", required=True, help="recorded request owner")

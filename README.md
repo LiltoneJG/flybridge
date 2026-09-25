@@ -84,7 +84,7 @@ sequenceDiagram
     B->>Q: release after use
 ```
 
-Use `queue status` for a snapshot and `queue watch` for live events. The queue tracks workflow ownership and survives CLI process exits. See the [resource queue contract](docs/en/specification.md#resource-queue-contract) for the lifecycle and recovery rules.
+Use `queue status` for counts, `queue status --details` to identify active request IDs and owners, and `queue watch` for live events. Old leases are flagged for attention without being released; verify external cleanup before explicitly releasing or cancelling one. The queue tracks workflow ownership and survives CLI process exits. See the [resource queue contract](docs/en/specification.md#resource-queue-contract) for the lifecycle and recovery rules.
 
 ## Optional GitHub Project workflow
 

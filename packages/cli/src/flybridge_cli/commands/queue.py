@@ -73,7 +73,24 @@ def handle(args: argparse.Namespace) -> int:
             _refresh_activation(store, _promoted_owner(queue, lease_id))
         print(json.dumps({"promoted_lease_ids": promoted}))
     elif args.queue_command == "status":
-        print(json.dumps(queue.status(args.resource), indent=2))
+        summary = queue.status(args.resource)
+        if args.details:
+            requests = queue.active_requests(
+                resource=args.resource,
+                attention_after_seconds=config.queue_lease_timeout_seconds,
+            )
+            print(
+                json.dumps(
+                    {
+                        "summary": summary,
+                        "requests": requests,
+                        "attention_after_seconds": config.queue_lease_timeout_seconds,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(json.dumps(summary, indent=2))
     elif args.queue_command == "inspect":
         print(json.dumps(queue.inspect(args.request_id, owner=args.owner), indent=2))
     else:

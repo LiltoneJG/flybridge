@@ -118,6 +118,7 @@ stateDiagram-v2
 - role の guidance では、lease は準備、干渉する処理、処理に応じた後片付け、次の利用者に干渉しないことの確認までを含みます。成功時も失敗時も必要な後片付けは role が判断し、無関係な資源には触れません。確認後にだけ release し、確認できなければ lease を保持して残存状態を operator に報告し、検証完了や role ready と宣言しません。これは agent 向けの指示であり、queue 側の cleanup 検査ではありません。owner が死んだ場合の回収では、外部資源が残っていても次の waiter が昇格し得ます。
 - 設定された resource 名は、`--config` と `--owner` を含む CLI acquire/release command とともに role prompt に含まれます。waiting caller は request identifier を報告して停止します。observer は FIFO 昇格後に lease identifier を伝えます。CLI inspect と release には永続的な request owner が必要です。
 - `queue.resources` は agent が調整すべき名前を prompt に挿入する一覧です。queue 自体は任意の resource 名を受け付けます。
+- `queue status --details [resource]` は集計数に加え、active request の ID、owner、状態、時刻、lease ID、経過時間を表示します。`workflow status` は選択した workflow の active request を含み、root を選んだ場合は child の request も含みます。`queue.lease_timeout_seconds` を超えた leased request には診断用の `attention_required` が付きます。この flag は外部 resource の後片付け完了を証明せず、lease を解放しません。operator は外部 resource を調べて後片付けを確認した後、対象 request を指定して `queue release` または `queue cancel` を実行します。生きている owner を経過時間だけで自動回収しません。
 - queue connection は SQLite lock の待ち時間を制限し、短時間の CLI 競合によって FIFO 順が暗黙に破られないようにします。
 
 ## GitHub と queue の契約

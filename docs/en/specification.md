@@ -117,6 +117,7 @@ stateDiagram-v2
 - Configured resource names are included in role prompts with CLI acquire and release commands, including `--config` and `--owner`. A waiting caller reports its request identifier and stops. The observer names the lease identifier after FIFO promotion. CLI inspect and release require the durable request owner.
 - `queue.resources` is the prompt-injection list of names agents should coordinate. The queue itself accepts any resource name.
 - Queue connections use a bounded SQLite lock wait so short CLI contention does not silently violate FIFO ordering.
+- `queue status --details [resource]` retains the aggregate counts and also lists active request IDs, owners, states, timestamps, lease IDs, and elapsed ages. `workflow status` includes active requests for the selected workflow (and its children when selecting a root). A leased request older than `queue.lease_timeout_seconds` receives an `attention_required` diagnostic flag; the flag is not evidence that external cleanup is complete and never releases a lease. Operators inspect the external resource and confirm cleanup before using the exact request's `queue release` or `queue cancel`; automatic age-based recovery of a live owner is not performed.
 
 ## GitHub and queue contracts
 

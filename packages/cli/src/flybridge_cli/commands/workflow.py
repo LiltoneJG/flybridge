@@ -1234,7 +1234,8 @@ def handle(args: argparse.Namespace) -> int:
         return 0
     if args.workflow_command == "status":
         workflow = store.get_by_run_or_step_id(args.workflow_id)
-        service = WorkflowService(store, ResourceQueue(config.state_dir))
+        queue = ResourceQueue(config.state_dir)
+        service = WorkflowService(store, queue)
         artifacts = service.artifact_metadata(workflow.id)
         client = _optional_adapter(config)
         root_id = workflow.id if workflow.parent_id is None else workflow.parent_id
@@ -1248,6 +1249,13 @@ def handle(args: argparse.Namespace) -> int:
             except ValueError:
                 # Role records predating the run aggregate stay reportable.
                 run = None
+        queue_owners = [workflow.id]
+        if workflow.parent_id is None:
+            queue_owners.extend(child.id for child in store.children(workflow.id))
+        active_requests = queue.active_requests(
+            owners=queue_owners,
+            attention_after_seconds=config.queue_lease_timeout_seconds,
+        )
         print(
             json.dumps(
                 {
@@ -1258,6 +1266,13 @@ def handle(args: argparse.Namespace) -> int:
                     "children": [asdict(child) for child in store.children(workflow.id)],
                     "artifacts": [asdict(artifact) for artifact in artifacts],
                     "progress": service.progress_snapshot(workflow.id),
+                    "resource_queue": {
+                        "requests": active_requests,
+                        "attention_after_seconds": config.queue_lease_timeout_seconds,
+                        "attention_required": any(
+                            item["attention_required"] for item in active_requests
+                        ),
+                    },
                     "observer": {
                         "enabled": workflow.queue_observer_enabled,
                         "owned_handles": store.owned_terminal_handles(workflow.id, kind="observer"),
