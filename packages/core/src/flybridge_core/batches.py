@@ -39,7 +39,12 @@ class BatchStore:
             )
 
     def add_item(
-        self, batch_id: str, index: int, path: str | None, workflow_id: str | None, error: str | None
+        self,
+        batch_id: str,
+        index: int,
+        path: str | None,
+        workflow_id: str | None,
+        error: str | None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -151,7 +156,9 @@ class BatchStore:
 
     def status(self, batch_id: str) -> dict[str, object]:
         with self._connect() as connection:
-            batch = connection.execute("SELECT * FROM batch_runs WHERE id = ?", (batch_id,)).fetchone()
+            batch = connection.execute(
+                "SELECT * FROM batch_runs WHERE id = ?", (batch_id,)
+            ).fetchone()
             if batch is None:
                 raise ValueError("batch was not found")
             items = connection.execute(

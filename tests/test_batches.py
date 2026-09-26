@@ -2,10 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
+from flybridge_application import WorkflowService
 from flybridge_cli.commands import workflow as workflow_command
 from flybridge_core import BatchStore, ResourceQueue, WorkflowStore
-from flybridge_application import WorkflowService
 
 
 def _single(store: WorkflowStore, path: Path, name: str) -> str:
@@ -95,8 +94,9 @@ def test_batch_watcher_retries_send_and_notifies_parent_once(
     batches.seal(batch_id)
 
     class Runtime:
-        attempts = 0
-        prompts: list[str] = []
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.prompts: list[str] = []
 
         def terminal_is_valid(self, worktree: str, terminal: str) -> bool:
             return worktree == "parent-worktree" and terminal == "parent-terminal"
@@ -140,9 +140,10 @@ def test_supervisor_restores_waiter_observer_and_reminds_live_holder(tmp_path: P
         )
 
     class Runtime:
-        next_observer = 0
-        closed: set[str] = set()
-        prompts: list[str] = []
+        def __init__(self) -> None:
+            self.next_observer = 0
+            self.closed: set[str] = set()
+            self.prompts: list[str] = []
 
         def terminal_is_valid(self, _worktree: str, handle: str | None) -> bool:
             return bool(handle and handle not in self.closed)
