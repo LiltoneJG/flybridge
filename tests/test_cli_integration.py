@@ -4390,6 +4390,10 @@ def _autonomous_orca_client(
                 return "coordinator"
             return f"coordinator-{self.coordinator_number}"
 
+        def create_observer(self, _worktree_id: str, _command: str) -> str:
+            self.__class__.terminal_number += 1
+            return f"observer-{self.terminal_number}"
+
         def implementation_identity(self, _worktree_id: str, _worktree_path: str):
             return "example/repo", "repo", repository_head["sha"]
 

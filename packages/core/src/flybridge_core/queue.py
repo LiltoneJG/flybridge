@@ -131,6 +131,10 @@ class ResourceQueue:
                 "INSERT INTO queue_requests VALUES (?, ?, ?, ?, ?, ?)",
                 (request_id, resource, owner, now, now, status.value),
             )
+            if status == QueueRequestStatus.WAITING:
+                connection.execute(
+                    "INSERT INTO queue_grant_notifications(request_id) VALUES (?)", (request_id,)
+                )
             self._event(
                 connection,
                 resource,
@@ -260,6 +264,48 @@ class ResourceQueue:
         query += " ORDER BY resource, updated_at, id"
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(query, params)]
+
+    def pending_grants(self, owner: str) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT q.id AS request_id, q.id AS lease_id, q.resource, q.owner,
+                           q.status
+                    FROM queue_requests q
+                    JOIN queue_grant_notifications n ON n.request_id = q.id
+                    WHERE q.owner = ? AND q.status = 'leased' AND n.delivered_at IS NULL
+                    ORDER BY q.created_at, q.id
+                    """,
+                    (owner,),
+                )
+            ]
+
+    def mark_grant_delivered(self, request_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE queue_grant_notifications SET delivered_at = ? "
+                "WHERE request_id = ? AND delivered_at IS NULL",
+                (_now(), request_id),
+            )
+
+    def reminder_due(self, request_id: str, interval_seconds: float) -> bool:
+        cutoff = (datetime.now(UTC) - timedelta(seconds=interval_seconds)).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT last_sent_at FROM queue_lease_reminders WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return row is None or row["last_sent_at"] is None or row["last_sent_at"] < cutoff
+
+    def mark_reminder_sent(self, request_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO queue_lease_reminders(request_id, last_sent_at) VALUES (?, ?) "
+                "ON CONFLICT(request_id) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+                (request_id, _now()),
+            )
 
     def recover_stale(self, max_age_seconds: float) -> list[str]:
         """Cancel age-stale leases and promote FIFO waiters. Operator recover only."""

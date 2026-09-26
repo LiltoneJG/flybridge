@@ -90,6 +90,21 @@ def _coordinator_command(config_path: Path, manager_id: str) -> str:
     )
 
 
+def _batch_watcher_command(config_path: Path, batch_id: str) -> str:
+    arguments = [
+        sys.executable,
+        "-m",
+        "flybridge_cli.main",
+        "--config",
+        str(config_path),
+        "workflow",
+        "batch",
+        "watch",
+        batch_id,
+    ]
+    return shlex.join(["/bin/sh", "-c", shlex.join(arguments)])
+
+
 def _validate_mode_skill_paths(config, mode: WorkflowMode) -> None:
     roles = (
         (WorkflowRole.SINGLE,)

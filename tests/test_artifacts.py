@@ -292,7 +292,7 @@ def test_future_schema_is_rejected_without_reclassifying_identity(tmp_path: Path
         connection.execute("DROP INDEX workflow_artifact_path")
         connection.execute("DROP TABLE workflow_artifacts")
         connection.execute("ALTER TABLE workflows DROP COLUMN runtime_repository_id")
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(RuntimeError, match="unsupported Flybridge state schema"):
         WorkflowStore(tmp_path / "state")
@@ -314,12 +314,12 @@ def test_future_readiness_schema_is_rejected_without_mutating_the_database(
     )
     with sqlite3.connect(store.path) as connection:
         connection.execute("ALTER TABLE workflow_role_readiness DROP COLUMN blocked_reason")
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(RuntimeError, match="unsupported Flybridge state schema"):
         WorkflowStore(state_dir)
     with sqlite3.connect(store.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         row = connection.execute(
             "SELECT outcome FROM workflow_role_readiness WHERE id = ?", (readiness.id,)
         ).fetchone()

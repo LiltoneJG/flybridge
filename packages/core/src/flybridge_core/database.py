@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -284,6 +284,51 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE queue_grant_notifications (
+        request_id TEXT PRIMARY KEY REFERENCES queue_requests(id),
+        delivered_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE queue_lease_reminders (
+        request_id TEXT PRIMARY KEY REFERENCES queue_requests(id),
+        last_sent_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE batch_runs (
+        id TEXT PRIMARY KEY,
+        parent_terminal TEXT NOT NULL,
+        parent_worktree TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('starting', 'watching', 'notified')),
+        watcher_handle TEXT,
+        notification_claim TEXT,
+        notification_claimed_at TEXT,
+        notification_error TEXT,
+        created_at TEXT NOT NULL,
+        notified_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE batch_items (
+        batch_id TEXT NOT NULL REFERENCES batch_runs(id),
+        item_index INTEGER NOT NULL,
+        path TEXT,
+        workflow_id TEXT REFERENCES workflows(id),
+        error TEXT,
+        PRIMARY KEY(batch_id, item_index)
+    )
+    """,
+    """
+    CREATE TABLE single_reports (
+        workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+        terminal_handle TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('done', 'blocked')),
+        summary TEXT NOT NULL,
+        reported_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE queue_events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
         resource TEXT NOT NULL, request_id TEXT NOT NULL, event TEXT NOT NULL
@@ -463,7 +508,30 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
         if "activated_at" not in columns:
             connection.execute("ALTER TABLE workflows ADD COLUMN activated_at TEXT")
         connection.execute("PRAGMA user_version = 2")
-        return 2
+        version = 2
+    if version == 2:
+        for statement in SCHEMA_STATEMENTS:
+            if any(
+                marker in statement
+                for marker in (
+                    "CREATE TABLE queue_grant_notifications",
+                    "CREATE TABLE queue_lease_reminders",
+                    "CREATE TABLE batch_runs",
+                    "CREATE TABLE batch_items",
+                    "CREATE TABLE single_reports",
+                )
+            ):
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute(
+            "INSERT OR IGNORE INTO queue_grant_notifications(request_id) "
+            "SELECT q.id FROM queue_requests q WHERE q.status IN ('waiting', 'leased') "
+            "AND EXISTS (SELECT 1 FROM queue_events e WHERE e.request_id = q.id "
+            "AND e.event = 'queued')"
+        )
+        connection.execute("PRAGMA user_version = 3")
+        return 3
     return version
 
 

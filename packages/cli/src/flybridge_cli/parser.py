@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     start.add_argument(
+        "--notify-terminal",
+        help="Orca terminal handle of the parent agent to notify when a batch is ready",
+    )
+    start.add_argument(
         "-d",
         "--allow-duplicate",
         action="store_true",
@@ -237,6 +241,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["approved", "changes-requested", "blocked"],
         help="reviewer outcome, or blocked for any orchestrated role",
     )
+    single_report = workflow_sub.add_parser(
+        "single-report", help="record a single agent's result for its parent batch"
+    )
+    single_report.add_argument("workflow_id")
+    single_report.add_argument("--outcome", required=True, choices=["done", "blocked"])
+    single_report.add_argument("--summary", required=True)
+    batch = workflow_sub.add_parser("batch", help="inspect or watch a parent batch")
+    batch_sub = batch.add_subparsers(dest="batch_command", required=True)
+    batch_status = batch_sub.add_parser("status")
+    batch_status.add_argument("batch_id")
+    batch_watch = batch_sub.add_parser("watch")
+    batch_watch.add_argument("batch_id")
+    batch_watch.add_argument("--once", action="store_true")
     supervise = workflow_sub.add_parser(
         "supervise", help="run the durable workflow coordinator or single-role watchdog"
     )

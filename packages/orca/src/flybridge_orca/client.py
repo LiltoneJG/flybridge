@@ -1066,6 +1066,21 @@ class OrcaClient:
         terminal = self._required_object(result, "terminal")
         return terminal.get("connected") is not False
 
+    def terminal_worktree(self, terminal_handle: str) -> str:
+        """Resolve and validate the worktree owning a notification target."""
+        result = self._json(["terminal", "show", "--terminal", terminal_handle])
+        if self._handle(result, "terminal") != terminal_handle:
+            raise OrcaError("Orca returned a different terminal than requested")
+        terminal = self._required_object(result, "terminal")
+        worktree_id = terminal.get("worktreeId")
+        if (
+            terminal.get("connected") is False
+            or not isinstance(worktree_id, str)
+            or not worktree_id
+        ):
+            raise OrcaError("parent terminal is not connected to a worktree")
+        return worktree_id
+
     def rename_terminal(self, terminal_handle: str, title: str) -> None:
         self._json(
             [

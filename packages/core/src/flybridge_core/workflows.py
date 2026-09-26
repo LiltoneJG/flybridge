@@ -733,6 +733,15 @@ class WorkflowStore:
                         "workflow lifecycle changed before terminal ownership was recorded",
                         kind=str(operation["kind"]) if operation is not None else "terminal",
                     )
+            if kind == "observer":
+                existing_observer = connection.execute(
+                    "SELECT handle FROM owned_terminals WHERE workflow_id = ? AND kind = 'observer'",
+                    (workflow_id,),
+                ).fetchone()
+                if existing_observer is not None and existing_observer["handle"] != handle:
+                    raise LifecycleOperationConflict(
+                        "queue observer is already owned by this workflow", kind="observer"
+                    )
             connection.execute(
                 "INSERT OR IGNORE INTO owned_terminals VALUES (?, ?, ?, ?)",
                 (workflow_id, handle, kind, _now()),

@@ -43,6 +43,8 @@ List the absolute path to `skills/` in `skills.sources` to discover bundled `SKI
 
 Role prompts include acquire/release when `queue.resources` is non-empty. Waiting agents stop until the worktree observer sends a lease-id notification. They must not poll inspect or watch. An empty resource list injects no resource instructions. When its original agent terminal becomes invalid, a notifying observer closes its Flybridge-owned terminal without changing its request or lease. `workflow observe` refuses to open a replacement while that owner terminal is dead. `workflow resume` restores the observer when `queue.observer` is true. Queue cancellation and stale recovery are intentionally operator-only CLI actions.
 
+For parent-managed batches, pass `--notify-terminal <Orca-handle>` to `workflow start --batch`. The output includes a `batch_id`; `workflow batch status <batch-id>` shows all item outcomes and delivery state. Single agents submit `workflow single-report <id> --outcome done|blocked --summary <text>` after releasing queue requests. The parent receives one batch summary when all items are ready, then verifies and finishes single workflows.
+
 ## Operator guidance
 
 | Command                    | Purpose                                                                                          |

@@ -43,6 +43,8 @@ Flybridge に含めるのは、再利用可能な公開 guidance だけです。
 
 `queue.resources` が空でない場合、role prompt に acquire/release が含まれます。待機中の agent は worktree observer が lease ID を通知するまで停止します。inspect や watch を poll してはなりません。resource list が空なら resource の指示は挿入されません。元の agent terminal が無効になると、通知を行う observer は request や lease を変更せず、Flybridge 所有の terminal を閉じます。`workflow observe` は owner terminal が死んでいる間は代替を開きません。`workflow resume` は `queue.observer` が true なら observer を復元します。queue の cancel と stale recovery は意図的に operator 専用の CLI 操作です。
 
+親が管理する batch では `workflow start --batch` に `--notify-terminal <Orca-handle>` を付けます。出力の `batch_id` を使い、`workflow batch status <batch-id>` で各 item と通知状態を確認できます。single agent は queue request を解放してから `workflow single-report <id> --outcome done|blocked --summary <text>` を送ります。全 item の作業が終了すると親に集計が届き、親が single を検証して終了します。
+
 ## Operator の案内
 
 | command                    | 用途                                                                    |

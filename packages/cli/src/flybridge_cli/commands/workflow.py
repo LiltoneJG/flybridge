@@ -4,10 +4,12 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import sys
 import time
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ from flybridge_application import (
 )
 from flybridge_core import (
     MAX_ARTIFACT_BYTES,
+    BatchStore,
     ConfigError,
     ReconcileStore,
     ResourceQueue,
@@ -33,6 +36,7 @@ from flybridge_core import (
 
 from ..runtime import (
     _adapter,
+    _batch_watcher_command,
     _config,
     _coordinator_command,
     _generated_workflow_name,
@@ -235,6 +239,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
         return _cmd_start_batch(args)
     if args.repository is None:
         raise ValueError("repository directory is required")
+    if args.notify_terminal is not None:
+        raise ValueError("--notify-terminal requires --batch")
     config = _config(args)
     objective = _resolve_objective(args.objective, args.objective_file)
     objective_source = _objective_source_path(args.objective, args.objective_file)
@@ -265,6 +271,23 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
         raise ValueError(f"batch file is not valid JSON: {exc}") from exc
     if not isinstance(payload, list):
         raise TypeError("batch file must contain a JSON array")
+    batch_store = BatchStore(config.state_dir) if args.notify_terminal else None
+    batch_id = None
+    if batch_store is not None:
+        client = _adapter(config)
+        parent_worktree = client.terminal_worktree(args.notify_terminal)
+        batch_id = batch_store.create(args.notify_terminal, parent_worktree)
+        watcher_handle = None
+        try:
+            watcher_handle = client.create_coordinator(
+                parent_worktree, _batch_watcher_command(config.path, batch_id)
+            )
+            batch_store.set_watcher(batch_id, watcher_handle)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            if watcher_handle:
+                client.close_terminals(parent_worktree, watcher_handle)
+            batch_store.remove_empty(batch_id)
+            raise
     results: list[dict[str, object]] = []
     ok = 0
     failed = 0
@@ -274,7 +297,10 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             row = {"index": index, "ok": False, "error": "batch item must be an object"}
             results.append(row)
             print(json.dumps(row, separators=(",", ":")), flush=True)
+            if batch_store is not None and batch_id is not None:
+                batch_store.add_item(batch_id, index, None, None, str(row["error"]))
             continue
+        launched_workflow_id = None
         try:
             path_value = item.get("path")
             repository_value = item.get("repository")
@@ -290,6 +316,10 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
                 path_value = repository_value
             if not isinstance(path_value, str) or not path_value.strip():
                 raise ValueError("batch item path is required")
+            if batch_store is not None:
+                active_batch = batch_store.active_path(str(Path(path_value).expanduser().resolve()))
+                if active_batch is not None:
+                    raise ValueError(f"worktree belongs to active batch {active_batch}")
             name = item.get("name")
             if name is not None and not isinstance(name, str):
                 raise ValueError("batch item name must be a string")
@@ -313,6 +343,10 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             issue = item.get("issue")
             if issue is not None and not isinstance(issue, str):
                 raise ValueError("batch item issue must be a string")
+            if batch_store is not None and batch_id is not None:
+                batch_store.add_item(
+                    batch_id, index, str(Path(path_value).expanduser().resolve()), None, None
+                )
             code, extras = _start_one(
                 config,
                 repository=Path(path_value),
@@ -328,16 +362,29 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             )
             if code != 0:
                 raise RuntimeError(f"start exited with status {code}")
+            launched_workflow_id = str(extras["workflow_id"])
+            if batch_store is not None and batch_id is not None:
+                batch_store.add_item(
+                    batch_id,
+                    index,
+                    str(Path(path_value).expanduser().resolve()),
+                    launched_workflow_id,
+                    None,
+                )
             ok += 1
             row = {
                 "index": index,
                 "ok": True,
-                "path": str(Path(path_value).resolve()),
+                "path": str(Path(path_value).expanduser().resolve()),
                 **extras,
             }
             results.append(row)
             print(json.dumps(row, separators=(",", ":")), flush=True)
         except (ConfigError, OSError, TypeError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            if launched_workflow_id is not None and batch_store is not None:
+                raise RuntimeError(
+                    f"started workflow {launched_workflow_id} could not be registered in batch"
+                ) from exc
             failed += 1
             row = {
                 "index": index,
@@ -347,7 +394,14 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             }
             results.append(row)
             print(json.dumps(row, separators=(",", ":")), flush=True)
-    print(json.dumps({"ok": ok, "failed": failed, "results": results}, indent=2), flush=True)
+            if batch_store is not None and batch_id is not None:
+                batch_store.add_item(batch_id, index, str(row["path"]), None, str(exc))
+    if batch_store is not None and batch_id is not None:
+        batch_store.seal(batch_id)
+    summary = {"ok": ok, "failed": failed, "results": results}
+    if batch_id is not None:
+        summary["batch_id"] = batch_id
+    print(json.dumps(summary, indent=2), flush=True)
     return 2 if failed else 0
 
 
@@ -445,6 +499,7 @@ def _start_one(
                         indent=2,
                     )
                 )
+            extras["workflow_id"] = workflow.id
             return 0, extras
         stale = service.store.find_unreconciled_by_adapter_reference(worktree_id)
         if stale is not None and stale.status in {
@@ -523,6 +578,7 @@ def _start_one(
                 indent=2,
             )
         )
+    extras["workflow_id"] = workflow.id
     return 0, extras
 
 
@@ -667,6 +723,89 @@ def _promoted_owner(queue: ResourceQueue, lease_id: str | None) -> str | None:
         return None
 
 
+def _maintain_queue(service: WorkflowService, config, client, root_id: str) -> None:
+    queue = service.queue if service.queue is not None else ResourceQueue(config.state_dir)
+    root = service.store.get(root_id)
+    records = (root, *service.store.children(root.id))
+    active = queue.active_requests(attention_after_seconds=config.queue_lease_timeout_seconds)
+    waiting_resources = {str(item["resource"]) for item in active if item["status"] == "waiting"}
+    waiting_owners = {str(item["owner"]) for item in active if item["status"] == "waiting"}
+    for record in records:
+        if record.status != WorkflowStatus.RUNNING or not _owner_terminal_valid(record, client):
+            continue
+        if record.queue_observer_enabled or record.id in waiting_owners:
+            try:
+                if not record.queue_observer_enabled:
+                    service.store.set_queue_observer_enabled(record.id, True)
+                service._ensure_observer(
+                    record.id,
+                    client,
+                    _observer_command(config.path, record.id),
+                    fail_workflow=False,
+                )
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                print(f"queue observer recovery pending for {record.id}: {exc}", file=sys.stderr)
+    owners = {record.id: record for record in records}
+    for item in active:
+        if (
+            item["status"] != "leased"
+            or item["resource"] not in waiting_resources
+            or not item["attention_required"]
+        ):
+            continue
+        owner = owners.get(str(item["owner"]))
+        if owner is None or not _owner_terminal_valid(owner, client):
+            continue
+        request_id = str(item["request_id"])
+        if not queue.reminder_due(request_id, config.queue_lease_timeout_seconds):
+            continue
+        try:
+            release_command = shlex.join(
+                [
+                    "flybridge",
+                    "--config",
+                    str(config.path),
+                    "queue",
+                    "release",
+                    str(item["resource"]),
+                    "--lease",
+                    request_id,
+                    "--owner",
+                    owner.id,
+                ]
+            )
+            client.wait_for_agent(owner.terminal_handle)
+            client.send_prompt(
+                owner.terminal_handle,
+                f"Flybridge queue reminder: you still hold resource `{item['resource']}` "
+                f"with lease-id `{request_id}`, and other workflows are waiting. "
+                "Check whether the interfering work and cleanup are finished. "
+                f"If so, run {release_command}. "
+                "If work is still active, keep the lease and report progress.",
+            )
+            queue.mark_reminder_sent(request_id)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            print(f"queue lease reminder pending for {request_id}: {exc}", file=sys.stderr)
+
+
+def _maintain_batch_watchers(config, client, workflow_id: str) -> None:
+    batches = BatchStore(config.state_dir)
+    for batch_id in batches.active_batches_for_workflow(workflow_id):
+        status = batches.status(batch_id)
+        if status["notification_error"] == "parent terminal is unavailable":
+            continue
+        handle = status["watcher_handle"]
+        try:
+            if handle and client.terminal_is_valid(str(status["parent_worktree"]), str(handle)):
+                continue
+            replacement = client.create_coordinator(
+                str(status["parent_worktree"]), _batch_watcher_command(config.path, batch_id)
+            )
+            batches.set_watcher(batch_id, replacement)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            batches.note_notification_error(batch_id, f"batch watcher recovery: {exc}")
+
+
 def _apply_watchdog(
     service: WorkflowService, config, client, root_id: str
 ) -> dict[str, object] | None:
@@ -697,8 +836,15 @@ def _apply_watchdog(
                 service, client, owner, f"resource-timeout: lease {item['resource']}"
             )
     waiting = set(queue.active_owners())
+    batches = BatchStore(config.state_dir)
     for record in records:
         if record.status != WorkflowStatus.RUNNING or record.id in waiting:
+            continue
+        if (
+            record.mode == WorkflowMode.SINGLE
+            and batches.is_member(record.id)
+            and batches.single_reported(record.id, record.terminal_handle)
+        ):
             continue
         if service.store.has_unconsumed_readiness(record.id):
             continue
@@ -745,6 +891,8 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
     manager = service.store.get(manager_id)
     if manager.mode == WorkflowMode.SINGLE:
         client = _adapter(config)
+        _maintain_batch_watchers(config, client, manager.id)
+        _maintain_queue(service, config, client, manager.id)
         timed_out = _apply_watchdog(service, config, client, manager.id)
         if timed_out is not None:
             return timed_out
@@ -772,6 +920,8 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
     if worker is None or not reviewers:
         raise ValueError("complete role plan was not found")
     client = _adapter(config)
+    _maintain_batch_watchers(config, client, manager.id)
+    _maintain_queue(service, config, client, manager.id)
     timed_out = _apply_watchdog(service, config, client, manager.id)
     if timed_out is not None:
         return timed_out
@@ -1009,6 +1159,40 @@ def _cmd_supervise(args: argparse.Namespace, config, service: WorkflowService) -
             return 0
         delay = float(result["retry_after_seconds"]) if result["action"] == "retry-wait" else 1.0
         time.sleep(max(delay, 0.01))
+
+
+def _cmd_batch_watch(args: argparse.Namespace, config, batches: BatchStore) -> int:
+    notification_token = str(uuid.uuid4())
+    while True:
+        status = batches.status(args.batch_id)
+        if args.once or status["status"] == "notified":
+            print(json.dumps(status, indent=2), flush=True)
+            return 0
+        if status["ready"]:
+            if not batches.claim_notification(args.batch_id, notification_token):
+                time.sleep(1.0)
+                continue
+            try:
+                client = _adapter(config)
+                parent_worktree = str(status["parent_worktree"])
+                parent_terminal = str(status["parent_terminal"])
+                if not client.terminal_is_valid(parent_worktree, parent_terminal):
+                    batches.note_notification_error(args.batch_id, "parent terminal is unavailable")
+                    return 2
+                client.wait_for_agent(parent_terminal)
+                client.send_prompt(
+                    parent_terminal,
+                    "Flybridge batch is ready for review. "
+                    "Check each result, verify single workflows, and finish them as appropriate. "
+                    f"Batch result: {json.dumps(status, ensure_ascii=False)}",
+                )
+                batches.mark_notified(args.batch_id, token=notification_token)
+                print(json.dumps(batches.status(args.batch_id), indent=2), flush=True)
+                return 0
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                batches.note_notification_error(args.batch_id, str(exc))
+                print(f"batch notification pending: {exc}", file=sys.stderr)
+        time.sleep(1.0)
 
 
 def _cmd_cleanup(args: argparse.Namespace, config, store: WorkflowStore) -> int:
@@ -1348,6 +1532,19 @@ def handle(args: argparse.Namespace) -> int:
     if args.workflow_command == "retire":
         return _cmd_retire(args, config, store)
     service = WorkflowService(store, ResourceQueue(config.state_dir))
+    if args.workflow_command == "single-report":
+        batches = BatchStore(config.state_dir)
+        batches.report_single(args.workflow_id, args.outcome, args.summary)
+        if batches.active_batches_for_workflow(args.workflow_id):
+            _maintain_batch_watchers(config, _adapter(config), args.workflow_id)
+        print(json.dumps({"workflow_id": args.workflow_id, "outcome": args.outcome}))
+        return 0
+    if args.workflow_command == "batch":
+        batches = BatchStore(config.state_dir)
+        if args.batch_command == "status":
+            print(json.dumps(batches.status(args.batch_id), indent=2))
+            return 0
+        return _cmd_batch_watch(args, config, batches)
     if args.workflow_command == "role-ready":
         readiness = service.role_ready(
             args.workflow_id,

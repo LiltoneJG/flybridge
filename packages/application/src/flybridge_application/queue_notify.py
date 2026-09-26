@@ -6,13 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from flybridge_core import (
-    QueueEvent,
-    QueueRequestStatus,
-    ResourceQueue,
-    WorkflowStatus,
-    WorkflowStore,
-)
+from flybridge_core import ResourceQueue, WorkflowStatus, WorkflowStore
 
 from .prompts import render_lease_grant_prompt
 from .runtime import WorkflowRuntime
@@ -37,13 +31,8 @@ class QueueLeaseNotifier:
         self.runtime = runtime
         self.workflow_id = workflow_id.strip()
         self.config_path = config_path
-        self.pending: set[str] = set()
-        self.notified: set[str] = set()
         workflow = store.get(self.workflow_id)
         self.owner_terminal_handle = workflow.terminal_handle
-        for row in queue.owner_requests(self.workflow_id):
-            if row["status"] == QueueRequestStatus.WAITING.value:
-                self.pending.add(str(row["request_id"]))
 
     def owner_terminal_is_available(self) -> bool:
         """Return false only for a definitively stopped or replaced owner terminal."""
@@ -78,42 +67,11 @@ class QueueLeaseNotifier:
         return errors
 
     def note_event(self, event: dict[str, object]) -> None:
-        """Track queued promotions for this owner only."""
-        request_id = str(event.get("request_id") or "")
-        name = str(event.get("event") or "")
-        if not request_id:
-            return
-        try:
-            details = self.queue.inspect(request_id)
-        except ValueError:
-            return
-        if details["owner"] != self.workflow_id:
-            return
-        if name == QueueEvent.QUEUED.value:
-            self.pending.add(request_id)
-            return
-        if name in {
-            QueueEvent.RELEASED.value,
-            QueueEvent.CANCELLED.value,
-            QueueEvent.RECOVERED.value,
-        }:
-            self.pending.discard(request_id)
+        """Queue events remain visible; delivery state is stored with the request."""
 
     def notify_due(self) -> dict[str, Any] | None:
-        """Send at most one grant prompt for a pending request that is now leased."""
-        for request_id in list(self.pending):
-            if request_id in self.notified:
-                continue
-            try:
-                details = self.queue.inspect(request_id, owner=self.workflow_id)
-            except ValueError:
-                self.pending.discard(request_id)
-                continue
-            if details["status"] != QueueRequestStatus.LEASED.value:
-                continue
-            lease_id = details["lease_id"]
-            if not isinstance(lease_id, str) or not lease_id:
-                continue
+        """Send a persisted promotion, including one missed while this observer was down."""
+        for details in self.queue.pending_grants(self.workflow_id):
             return self._notify(details)
         return None
 
@@ -144,8 +102,7 @@ class QueueLeaseNotifier:
                 "lease_id": lease_id,
                 "error": str(exc),
             }
-        self.notified.add(request_id)
-        self.pending.discard(request_id)
+        self.queue.mark_grant_delivered(request_id)
         return {
             "event": "notify_sent",
             "request_id": request_id,

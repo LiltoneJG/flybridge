@@ -176,7 +176,11 @@ def _operator_lifecycle(role: WorkflowRole, workflow_id: str, config_path: Path 
         "`workflow artifact put` and `workflow role-ready` are orchestrated-only; do not run "
         "them from a single role. "
         "Commit required work and, after local verification passes, push once from this worktree. "
-        "Report the result or blocker, then stop. Do not run `workflow complete`. "
+        "Report the result or blocker using "
+        f"`{_queue_cli(config_path)} workflow single-report {workflow_id or '<workflow-id>'} "
+        '--outcome done|blocked --summary "ONE LINE RESULT"`, then stop. '
+        "Do not run this report while a queue request is waiting or leased. "
+        "Do not run `workflow complete`. "
         "If required input is missing, request it and report the blocker without claiming "
         "readiness or supplying a successor handoff. Waiting on a Flybridge queue resource is "
         "parking: report the request-id and stop until the lease-id arrives. "

@@ -1,6 +1,7 @@
 """Core configuration, state, and deterministic resource scheduling."""
 
 from .artifacts import MAX_ARTIFACT_BYTES, WorkflowArtifact, WorkflowArtifactStore
+from .batches import BatchStore
 from .cli import ArgumentParser
 from .config import ROLES, AgentSpec, AppConfig, ConfigError, ReconcileConfig, load_config
 from .issue_url import (
@@ -47,6 +48,7 @@ __all__ = [
     "AgentSpec",
     "AppConfig",
     "ArgumentParser",
+    "BatchStore",
     "ConfigError",
     "GitHubIssueRef",
     "LifecycleOperationConflict",

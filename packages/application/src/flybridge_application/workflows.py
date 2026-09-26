@@ -790,7 +790,12 @@ class WorkflowService:
         return self.store.handoff_for(workflow.id).summary
 
     def _ensure_observer(
-        self, workflow_id: str, runtime: WorkflowRuntime, command: str | None
+        self,
+        workflow_id: str,
+        runtime: WorkflowRuntime,
+        command: str | None,
+        *,
+        fail_workflow: bool = True,
     ) -> None:
         workflow = self.store.get(workflow_id)
         if command is None or not workflow.queue_observer_enabled:
@@ -815,9 +820,16 @@ class WorkflowService:
                         continue
         if live:
             return
-        self.attach_observer(workflow.id, runtime, command)
+        self.attach_observer(workflow.id, runtime, command, fail_workflow=fail_workflow)
 
-    def attach_observer(self, workflow_id: str, runtime: WorkflowRuntime, command: str) -> str:
+    def attach_observer(
+        self,
+        workflow_id: str,
+        runtime: WorkflowRuntime,
+        command: str,
+        *,
+        fail_workflow: bool = True,
+    ) -> str:
         """Create and persist a queue observer or fail the owned workflow cleanly."""
         workflow = self.store.get(workflow_id)
         if workflow.status != WorkflowStatus.RUNNING or not workflow.adapter_reference:
@@ -839,6 +851,13 @@ class WorkflowService:
                 f"queue observer ownership changed during startup: {exc}{cleanup_error}"
             ) from exc
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            if not fail_workflow:
+                if handle:
+                    try:
+                        runtime.close_terminals(workflow.adapter_reference, handle)
+                    except (OSError, RuntimeError):
+                        pass
+                raise RuntimeError(f"queue observer restart failed: {exc}") from exc
             error_text = str(exc)
             detail = f"queue observer startup failed: {error_text}"
             try:

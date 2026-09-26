@@ -65,7 +65,7 @@ In orchestrated mode, multiple agents start in a hierarchy and divide the work a
 
 ## Sharing exclusive resources
 
-Parallel worktrees can still contend for a device, test rig, large build, or another operation that must run alone. Configure resource names in `queue.resources`; agents then acquire a lease before a conflicting operation and release it afterward. Flybridge grants leases in first-in, first-out order per resource. A waiting agent parks; when the queue observer is enabled, it delivers the granted lease so the agent can continue. Other worktrees remain free to run. A heavy verification run is one use case, not a special queue type.
+Parallel worktrees can still contend for a device, test rig, large build, or another operation that must run alone. Configure resource names in `queue.resources`; agents then acquire a lease before a conflicting operation and release it afterward. Flybridge grants leases in first-in, first-out order per resource. A waiting agent parks; Flybridge starts or restores its queue observer and delivers the granted lease so the agent can continue. Other worktrees remain free to run. A heavy verification run is one use case, not a special queue type.
 
 ```mermaid
 sequenceDiagram

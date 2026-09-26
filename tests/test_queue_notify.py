@@ -166,3 +166,42 @@ def test_notifier_retries_after_transient_workflow_database_failure(
     assert sent is not None
     assert sent["event"] == "notify_sent"
     assert sent["lease_id"] == waiting.request_id
+
+
+def test_notifier_delivers_promotion_missed_while_observer_was_stopped(tmp_path: Path) -> None:
+    _store, holder = _running(tmp_path, "holder", "term-holder")
+    waiter_store, waiter = _running(tmp_path / "waiter", "waiter", "term-waiter")
+    queue = ResourceQueue(tmp_path)
+    lease = queue.acquire("probe", holder)
+    waiting = queue.acquire("probe", waiter)
+    queue.release(lease.lease_id or "")
+
+    runtime = FakeRuntime()
+    restarted = QueueLeaseNotifier(queue, waiter_store, runtime, waiter)
+    assert restarted.notify_due()["lease_id"] == waiting.request_id
+    assert QueueLeaseNotifier(queue, waiter_store, runtime, waiter).notify_due() is None
+    assert len(runtime.sent) == 1
+
+
+def test_version_two_migration_recovers_unnotified_promotion(tmp_path: Path) -> None:
+    _store, holder = _running(tmp_path, "holder", "term-holder")
+    waiter_store, waiter = _running(tmp_path / "waiter", "waiter", "term-waiter")
+    queue = ResourceQueue(tmp_path)
+    lease = queue.acquire("probe", holder)
+    waiting = queue.acquire("probe", waiter)
+    queue.release(lease.lease_id or "")
+    with sqlite3.connect(queue.path) as connection:
+        for table in (
+            "queue_grant_notifications",
+            "queue_lease_reminders",
+            "batch_items",
+            "batch_runs",
+            "single_reports",
+        ):
+            connection.execute(f"DROP TABLE {table}")
+        connection.execute("PRAGMA user_version = 2")
+
+    reopened = ResourceQueue(tmp_path)
+    runtime = FakeRuntime()
+    notifier = QueueLeaseNotifier(reopened, waiter_store, runtime, waiter)
+    assert notifier.notify_due()["lease_id"] == waiting.request_id
