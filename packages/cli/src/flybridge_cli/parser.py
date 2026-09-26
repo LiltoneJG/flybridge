@@ -68,6 +68,23 @@ def build_parser() -> argparse.ArgumentParser:
     acquire = queue_sub.add_parser("acquire", help="enqueue and acquire a named resource")
     acquire.add_argument("resource", help="interfering resource name")
     acquire.add_argument("-o", "--owner", required=True, help="running workflow owner")
+    run = queue_sub.add_parser("run", help="schedule a command under a resource lease")
+    run.add_argument("resource")
+    run.add_argument("-o", "--owner", required=True)
+    run.add_argument(
+        "--cleanup-check",
+        required=True,
+        type=Path,
+        help="executable that proves the resource is safe for its next owner",
+    )
+    run.add_argument("argv", nargs="*", help="command argument vector after --")
+    ack = queue_sub.add_parser("ack", help="acknowledge a promoted lease")
+    ack.add_argument("request_id")
+    ack.add_argument("--lease", required=True)
+    ack.add_argument("-o", "--owner", required=True)
+    ack_result = queue_sub.add_parser("ack-result", help="acknowledge a queue job result")
+    ack_result.add_argument("request_id")
+    ack_result.add_argument("-o", "--owner", required=True)
     release = queue_sub.add_parser("release", help="release an active resource lease")
     release.add_argument("resource", help="interfering resource name")
     release.add_argument("-l", "--lease", required=True, help="active lease identifier")
@@ -78,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument(
         "-t", "--older-than-seconds", type=float, required=True, help="stale lease age"
     )
+    resolve = queue_sub.add_parser("resolve", help="clear one resource recovery block")
+    resolve.add_argument("--request", required=True)
+    resolve.add_argument("--cleanup-confirmed", action="store_true", required=True)
+    dispatcher = queue_sub.add_parser("dispatcher", help="manage the durable queue dispatcher")
+    dispatcher_sub = dispatcher.add_subparsers(dest="dispatcher_command", required=True)
+    dispatcher_sub.add_parser("start")
+    dispatcher_sub.add_parser("status")
+    dispatcher_sub.add_parser("serve", help="internal foreground service")
     status = queue_sub.add_parser("status", help="summarize resource queue states")
     status.add_argument("resource", nargs="?", help="optional resource name")
     status.add_argument(

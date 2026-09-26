@@ -125,12 +125,13 @@ def test_batch_watcher_retries_send_and_notifies_parent_once(
     capsys.readouterr()
 
 
-def test_supervisor_restores_waiter_observer_and_reminds_live_holder(tmp_path: Path) -> None:
+def test_supervisor_restores_configured_observer_and_reminds_live_holder(tmp_path: Path) -> None:
     store = WorkflowStore(tmp_path)
     queue = ResourceQueue(tmp_path)
     service = WorkflowService(store, queue)
     holder = _single(store, tmp_path / "holder", "holder")
     waiter = _single(store, tmp_path / "waiter", "waiter")
+    store.set_queue_observer_enabled(waiter, True)
     lease = queue.acquire("verification", holder)
     queue.acquire("verification", waiter)
     with queue._connect() as connection:

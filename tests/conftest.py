@@ -4,6 +4,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def mock_dispatcher_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The unit suite never starts a resident process or a real Orca client."""
+    monkeypatch.setattr("flybridge_cli.commands.queue.ensure_dispatcher", lambda *_args: None)
+    monkeypatch.setattr("flybridge_cli.commands.workflow.ensure_dispatcher", lambda *_args: None)
+
+
 ENABLED_GITHUB = {
     "enabled": True,
     "login": "alice",

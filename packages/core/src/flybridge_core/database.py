@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -286,7 +286,50 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE queue_grant_notifications (
         request_id TEXT PRIMARY KEY REFERENCES queue_requests(id),
-        delivered_at TEXT
+        delivered_at TEXT,
+        sent_at TEXT,
+        acknowledged_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+    )
+    """,
+    """
+    CREATE TABLE queue_resource_blocks (
+        resource TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL REFERENCES queue_requests(id),
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE queue_jobs (
+        request_id TEXT PRIMARY KEY REFERENCES queue_requests(id),
+        argv_json TEXT NOT NULL,
+        cleanup_check TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'recovery_required')),
+        started_at TEXT,
+        finished_at TEXT,
+        command_exit_code INTEGER,
+        check_exit_code INTEGER,
+        error TEXT
+    )
+    """,
+    """
+    CREATE TABLE queue_result_notifications (
+        request_id TEXT PRIMARY KEY REFERENCES queue_requests(id),
+        sent_at TEXT,
+        acknowledged_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+    )
+    """,
+    """
+    CREATE TABLE queue_dispatcher_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        pid INTEGER NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        last_error TEXT
     )
     """,
     """
@@ -531,7 +574,39 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
             "AND e.event = 'queued')"
         )
         connection.execute("PRAGMA user_version = 3")
-        return 3
+        version = 3
+    if version == 3:
+        existing_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(queue_grant_notifications)")
+        }
+        for column in (
+            "sent_at TEXT",
+            "acknowledged_at TEXT",
+            "attempts INTEGER NOT NULL DEFAULT 0",
+            "last_error TEXT",
+        ):
+            if column.split()[0] not in existing_columns:
+                connection.execute(f"ALTER TABLE queue_grant_notifications ADD COLUMN {column}")
+        connection.execute(
+            "UPDATE queue_grant_notifications SET sent_at=delivered_at, "
+            "attempts=CASE WHEN delivered_at IS NULL THEN 0 ELSE 1 END"
+        )
+        for statement in SCHEMA_STATEMENTS:
+            if any(
+                marker in statement
+                for marker in (
+                    "CREATE TABLE queue_resource_blocks",
+                    "CREATE TABLE queue_jobs",
+                    "CREATE TABLE queue_result_notifications",
+                    "CREATE TABLE queue_dispatcher_state",
+                )
+            ):
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 4")
+        return 4
     return version
 
 

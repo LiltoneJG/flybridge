@@ -1,19 +1,16 @@
-"""Deterministic lease-grant delivery through a workflow's agent terminal."""
+"""Lifecycle ownership for a display-only queue observer terminal."""
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
-from typing import Any
 
 from flybridge_core import ResourceQueue, WorkflowStatus, WorkflowStore
 
-from .prompts import render_lease_grant_prompt
 from .runtime import WorkflowRuntime
 
 
 class QueueLeaseNotifier:
-    """Wake one parked owner after FIFO promotion. Never reorders the queue."""
+    """Keep a visible observer tied to its original agent terminal."""
 
     def __init__(
         self,
@@ -65,47 +62,3 @@ class QueueLeaseNotifier:
             except (OSError, RuntimeError) as exc:
                 errors.append(f"{handle}: {exc}")
         return errors
-
-    def note_event(self, event: dict[str, object]) -> None:
-        """Queue events remain visible; delivery state is stored with the request."""
-
-    def notify_due(self) -> dict[str, Any] | None:
-        """Send a persisted promotion, including one missed while this observer was down."""
-        for details in self.queue.pending_grants(self.workflow_id):
-            return self._notify(details)
-        return None
-
-    def _notify(self, details: dict[str, object]) -> dict[str, Any]:
-        request_id = str(details["request_id"])
-        lease_id = str(details["lease_id"])
-        resource = str(details["resource"])
-        try:
-            workflow = self.store.get(self.workflow_id)
-            handle = workflow.terminal_handle
-            if not handle or not workflow.adapter_reference:
-                raise ValueError("running workflow has no resumable agent terminal")
-            if not self.runtime.terminal_is_valid(workflow.adapter_reference, handle):
-                raise ValueError("agent terminal is no longer valid")
-            prompt = render_lease_grant_prompt(
-                resource=resource,
-                request_id=request_id,
-                lease_id=lease_id,
-                workflow_id=self.workflow_id,
-                config_path=self.config_path,
-            )
-            self.runtime.wait_for_agent(handle)
-            self.runtime.send_prompt(handle, prompt)
-        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-            return {
-                "event": "notify_failed",
-                "request_id": request_id,
-                "lease_id": lease_id,
-                "error": str(exc),
-            }
-        self.queue.mark_grant_delivered(request_id)
-        return {
-            "event": "notify_sent",
-            "request_id": request_id,
-            "lease_id": lease_id,
-            "resource": resource,
-        }

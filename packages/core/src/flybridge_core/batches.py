@@ -128,6 +128,14 @@ class BatchStore:
             ).fetchone()
             if active is not None:
                 raise ValueError("release or cancel active queue requests before reporting")
+            pending_result = connection.execute(
+                "SELECT 1 FROM queue_jobs j JOIN queue_requests q ON q.id=j.request_id "
+                "JOIN queue_result_notifications n ON n.request_id=j.request_id "
+                "WHERE q.owner=? AND n.acknowledged_at IS NULL",
+                (workflow_id,),
+            ).fetchone()
+            if pending_result is not None:
+                raise ValueError("acknowledge queue job results before reporting")
             previous = connection.execute(
                 "SELECT terminal_handle, outcome, summary FROM single_reports WHERE workflow_id = ?",
                 (workflow_id,),

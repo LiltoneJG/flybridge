@@ -54,7 +54,7 @@ sequenceDiagram
 
 ## Runtime ownership
 
-Flybridge does not create a daemon. Agents and operators share the same CLI against SQLite-backed queue state. The queue observer is an explicitly created Orca terminal that can deliver a lease-grant prompt after FIFO promotion; it never changes queue order. Durable state lives in SQLite so it survives terminal closure. `workflow cleanup` reports Flybridge-owned stale records and finished roots that still own child worktrees; leftover children are retired, not age-applied. It must never kill an unrelated process. Adapter subprocesses use bounded execution and are waited for before their caller exits.
+Flybridge starts one detached queue dispatcher per state directory when workflows or queue operations start. A local file lock prevents duplicate dispatchers; the dispatcher uses SQLite to deliver persisted grants, run registered checks, and detect dead owners. Agent and operator CLIs still share SQLite state. Display observers are Orca terminals and do not grant or release leases. The dispatcher is restarted by later CLI calls or live supervisors; it has no OS service manager, so it cannot recover itself when all processes stop. `workflow cleanup` reports Flybridge-owned stale records and finished roots that still own child worktrees; leftover children are retired, not age-applied. It must never kill an unrelated process.
 
 The unified `flybridge.sqlite3` state database requires SQLite WAL mode. A filesystem that cannot enable WAL is rejected rather than silently using rollback journaling. This keeps multiple CLI and observer processes from depending on filesystem-specific lock behaviour.
 

@@ -34,6 +34,7 @@ from flybridge_core import (
     parse_issue_url,
 )
 
+from ..dispatcher import ensure_dispatcher
 from ..runtime import (
     _adapter,
     _batch_watcher_command,
@@ -157,19 +158,27 @@ def _sync_orca(config, *, fatal: bool) -> dict[str, object]:
     return store.freshness()
 
 
-def _owner_terminal_valid(workflow, client) -> bool:
+def _owner_terminal_state(workflow, client) -> str:
     if client is None:
-        return False
+        return "unknown"
     if (
         workflow.status != WorkflowStatus.RUNNING
         or not workflow.adapter_reference
         or not workflow.terminal_handle
     ):
-        return False
+        return "invalid"
     try:
-        return bool(client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle))
+        return (
+            "valid"
+            if client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle)
+            else "invalid"
+        )
     except (OSError, RuntimeError, ValueError, AttributeError):
-        return False
+        return "unknown"
+
+
+def _owner_terminal_valid(workflow, client) -> bool:
+    return _owner_terminal_state(workflow, client) == "valid"
 
 
 def _workflow_list_item(workflow, *, owner_terminal_valid: bool) -> dict[str, object]:
@@ -236,7 +245,11 @@ def _cmd_start(args: argparse.Namespace) -> int:
             raise ValueError("start --batch cannot be combined with a repository argument")
         if args.attach_existing:
             raise ValueError("start --batch always attaches existing worktrees")
-        return _cmd_start_batch(args)
+        code = _cmd_start_batch(args)
+        if code == 0:
+            config = _config(args)
+            ensure_dispatcher(config.path, config.state_dir)
+        return code
     if args.repository is None:
         raise ValueError("repository directory is required")
     if args.notify_terminal is not None:
@@ -257,6 +270,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
         issue=args.issue,
         print_result=True,
     )
+    if code == 0:
+        ensure_dispatcher(config.path, config.state_dir)
     return code
 
 
@@ -724,19 +739,17 @@ def _promoted_owner(queue: ResourceQueue, lease_id: str | None) -> str | None:
 
 
 def _maintain_queue(service: WorkflowService, config, client, root_id: str) -> None:
+    ensure_dispatcher(config.path, config.state_dir)
     queue = service.queue if service.queue is not None else ResourceQueue(config.state_dir)
     root = service.store.get(root_id)
     records = (root, *service.store.children(root.id))
     active = queue.active_requests(attention_after_seconds=config.queue_lease_timeout_seconds)
     waiting_resources = {str(item["resource"]) for item in active if item["status"] == "waiting"}
-    waiting_owners = {str(item["owner"]) for item in active if item["status"] == "waiting"}
     for record in records:
         if record.status != WorkflowStatus.RUNNING or not _owner_terminal_valid(record, client):
             continue
-        if record.queue_observer_enabled or record.id in waiting_owners:
+        if record.queue_observer_enabled:
             try:
-                if not record.queue_observer_enabled:
-                    service.store.set_queue_observer_enabled(record.id, True)
                 service._ensure_observer(
                     record.id,
                     client,
@@ -813,6 +826,21 @@ def _apply_watchdog(
     root = service.store.get(root_id)
     records = (root, *service.store.children(root.id))
     owners = {record.id for record in records}
+    for item in queue.active_requests(
+        owners=owners, attention_after_seconds=config.queue_lease_timeout_seconds
+    ):
+        if item["status"] != "waiting":
+            continue
+        try:
+            owner = service.store.get(str(item["owner"]))
+        except ValueError:
+            queue.cancel(str(item["request_id"]))
+            continue
+        if _owner_terminal_state(owner, client) != "invalid":
+            continue
+        queue.cancel(str(item["request_id"]))
+        if owner.status == WorkflowStatus.RUNNING:
+            return _timeout_block(service, client, owner, "resource-wait-owner-unavailable")
     for item in queue.leased_requests(owners=owners):
         request_id = str(item["request_id"])
         try:
@@ -824,7 +852,10 @@ def _apply_watchdog(
                 continue
             _refresh_activation(service.store, _promoted_owner(queue, promoted))
             continue
-        if owner.status == WorkflowStatus.RUNNING and _owner_terminal_valid(owner, client):
+        terminal_state = _owner_terminal_state(owner, client)
+        if owner.status == WorkflowStatus.RUNNING and terminal_state == "valid":
+            continue
+        if owner.status == WorkflowStatus.RUNNING and terminal_state == "unknown":
             continue
         try:
             promoted = queue.cancel(request_id)
@@ -1452,6 +1483,8 @@ def handle(args: argparse.Namespace) -> int:
                     "progress": service.progress_snapshot(workflow.id),
                     "resource_queue": {
                         "requests": active_requests,
+                        "pending_results": queue.pending_results(queue_owners),
+                        "recovery_blocks": queue.owner_blocks(queue_owners),
                         "attention_after_seconds": config.queue_lease_timeout_seconds,
                         "attention_required": any(
                             item["attention_required"] for item in active_requests

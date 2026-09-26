@@ -382,11 +382,12 @@ def render_start_prompt(
 Resource coordination:
 - The following names identify mutually exclusive resources: {resources}.
 - Before using one, run `{cli} queue acquire <resource> --owner {workflow_id}` once.
+- For a fixed command with an executable cleanup proof, use `{cli} queue run <resource> --owner {workflow_id} --cleanup-check <executable> -- <command> <args>` instead. Flybridge runs it after FIFO promotion. Park until its result notification arrives, acknowledge the result, and only then report readiness or completion; do not run that command separately.
 - The lease covers preparation, the interfering operation, operation-specific cleanup, and confirmation that the next holder can use the resource without interference. Clean up temporary state created or changed by your work on success or failure; do not change unrelated resources. A command exiting alone does not confirm cleanup.
 - If the result is granted, run the interfering operation, complete and confirm cleanup, then `{cli} queue release <resource> --lease <lease-id> --owner {workflow_id}`. Do not claim verification complete before cleanup is confirmed.
 - If the result is waiting, report the request-id and park in this terminal. Do not poll `queue inspect`, run `queue watch`, interpret observer JSON, or run `role-ready --outcome blocked` for the wait.
-- Resume the interfering operation only when a later Flybridge message names the lease-id. After the grant, complete and confirm cleanup before `queue release`. If cleanup cannot be confirmed, keep the lease and this terminal available, report the remaining state for operator recovery, and do not claim verification complete or role readiness.
-- Queue cancellation is operator-only. The Flybridge supervisor expires a lease only when its owner is dead.
+- Resume a manual interfering operation only when a later Flybridge message names the lease-id. Acknowledge that grant as instructed. After the grant, complete and confirm cleanup before `queue release`. If cleanup cannot be confirmed, keep the lease and this terminal available, report the remaining state for operator recovery, and do not claim verification complete or role readiness.
+- Queue cancellation is operator-only. An unverified abandoned lease blocks the resource until an operator confirms cleanup.
 """
     continuity = ROLE_BRANCH_CONTINUITY.get(role)
     branch_continuity = f"\nBranch continuity: {continuity}\n" if continuity else ""
@@ -523,6 +524,8 @@ def render_lease_grant_prompt(
         "Flybridge queue notification: your waiting request is now leased. "
         f"Treat this message as the start of the interfering operation for `{resource}`. "
         f"request-id `{request_id.strip()}`; lease-id `{lease_id.strip()}`. "
+        f"Acknowledge now with `{cli} queue ack {request_id.strip()} "
+        f"--lease {lease_id.strip()} --owner {workflow_id.strip()}`. "
         "Hold the lease through the work, operation-specific cleanup, and confirmation that "
         "the next holder will not be affected. Clean up on success or failure. Release only "
         f"after cleanup is confirmed with `{cli} queue release {resource.strip()} "

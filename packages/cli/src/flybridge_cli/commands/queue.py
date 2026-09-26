@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import time
 from dataclasses import asdict
@@ -10,6 +11,7 @@ from math import isfinite
 from flybridge_application import QueueLeaseNotifier, WorkflowService
 from flybridge_core import ResourceQueue, WorkflowStore
 
+from ..dispatcher import QueueDispatcher, dispatcher_status, ensure_dispatcher
 from ..runtime import _adapter, _config, _running_owner
 
 _WATCH_ERRORS = (OSError, RuntimeError, ValueError, sqlite3.Error)
@@ -57,21 +59,58 @@ def handle(args: argparse.Namespace) -> int:
             raise ValueError("owner workflow stopped during resource acquisition") from exc
         if result.granted and (existing is None or existing["status"] != "leased"):
             _refresh_activation(store, owner)
+        ensure_dispatcher(config.path, config.state_dir)
         print(json.dumps(asdict(result)))
+    elif args.queue_command == "run":
+        owner = _running_owner(store, args.owner)
+        workflow = store.get(owner)
+        if not workflow.worktree_path:
+            raise ValueError("running workflow has no recorded worktree path")
+        check = args.cleanup_check.expanduser().resolve()
+        if not check.is_file() or not os.access(check, os.X_OK):
+            raise ValueError("cleanup check must be an executable file")
+        argv = list(args.argv)
+        if argv and argv[0] == "--":
+            argv.pop(0)
+        result = queue.acquire(
+            args.resource,
+            owner,
+            job_argv=argv,
+            cleanup_check=str(check),
+            worktree_path=workflow.worktree_path,
+        )
+        ensure_dispatcher(config.path, config.state_dir)
+        print(json.dumps({**asdict(result), "job_status": "queued"}))
+    elif args.queue_command == "ack":
+        queue.acknowledge(args.request_id, args.lease, args.owner)
+        print(json.dumps({"request_id": args.request_id, "acknowledged": True}))
+    elif args.queue_command == "ack-result":
+        queue.acknowledge_result(args.request_id, args.owner)
+        print(json.dumps({"request_id": args.request_id, "acknowledged": True}))
     elif args.queue_command == "release":
         next_lease_id = queue.release(args.lease, resource=args.resource, owner=args.owner)
+        ensure_dispatcher(config.path, config.state_dir)
         _refresh_activation(store, args.owner)
         _refresh_activation(store, _promoted_owner(queue, next_lease_id))
         print(json.dumps({"next_lease_id": next_lease_id}))
     elif args.queue_command == "cancel":
         next_lease_id = queue.cancel(args.request)
+        ensure_dispatcher(config.path, config.state_dir)
         _refresh_activation(store, _promoted_owner(queue, next_lease_id))
         print(json.dumps({"next_lease_id": next_lease_id}))
     elif args.queue_command == "recover":
-        promoted = queue.recover_stale(args.older_than_seconds)
-        for lease_id in promoted:
-            _refresh_activation(store, _promoted_owner(queue, lease_id))
-        print(json.dumps({"promoted_lease_ids": promoted}))
+        print(json.dumps({"stale_request_ids": queue.recover_stale(args.older_than_seconds)}))
+    elif args.queue_command == "resolve":
+        next_lease_id = queue.resolve(args.request, cleanup_confirmed=args.cleanup_confirmed)
+        ensure_dispatcher(config.path, config.state_dir)
+        _refresh_activation(store, _promoted_owner(queue, next_lease_id))
+        print(json.dumps({"next_lease_id": next_lease_id}))
+    elif args.queue_command == "dispatcher":
+        if args.dispatcher_command == "serve":
+            return QueueDispatcher(config).serve()
+        if args.dispatcher_command == "start":
+            ensure_dispatcher(config.path, config.state_dir)
+        print(json.dumps(dispatcher_status(queue), indent=2))
     elif args.queue_command == "status":
         summary = queue.status(args.resource)
         if args.details:
@@ -84,6 +123,13 @@ def handle(args: argparse.Namespace) -> int:
                     {
                         "summary": summary,
                         "requests": requests,
+                        "pending_results": [
+                            item
+                            for item in queue.pending_results()
+                            if args.resource is None or item["resource"] == args.resource
+                        ],
+                        "recovery_blocks": queue.blocks(args.resource),
+                        "dispatcher": dispatcher_status(queue),
                         "attention_after_seconds": config.queue_lease_timeout_seconds,
                     },
                     indent=2,
@@ -181,12 +227,6 @@ def handle(args: argparse.Namespace) -> int:
                 for event in events:
                     cursor = int(event["sequence"])
                     print(json.dumps(event), flush=True)
-                    if notifier is not None:
-                        notifier.note_event(event)
-                if notifier is not None:
-                    notification = notifier.notify_due()
-                    if notification is not None:
-                        print(json.dumps(notification), flush=True)
             except _WATCH_ERRORS as exc:
                 print(
                     json.dumps({"event": "watch_iteration_failed", "error": str(exc)}),

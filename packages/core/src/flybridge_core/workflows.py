@@ -86,7 +86,6 @@ def _now() -> str:
 
 def _cancel_queue_owners(connection: sqlite3.Connection, owners: list[str]) -> None:
     """Cancel queue ownership and promote FIFO successors in the caller's transaction."""
-    leased_resources: set[str] = set()
     for owner in owners:
         rows = connection.execute(
             "SELECT id, resource, status FROM queue_requests WHERE owner=? "
@@ -103,24 +102,16 @@ def _cancel_queue_owners(connection: sqlite3.Connection, owners: list[str]) -> N
                 "VALUES (?, ?, ?, 'cancelled')",
                 (_now(), row["resource"], row["id"]),
             )
-            if row["status"] == "leased":
-                leased_resources.add(str(row["resource"]))
-    for resource in sorted(leased_resources):
-        row = connection.execute(
-            "SELECT id FROM queue_requests WHERE resource=? AND status='waiting' "
-            "ORDER BY created_at, id LIMIT 1",
-            (resource,),
-        ).fetchone()
-        if row:
             connection.execute(
-                "UPDATE queue_requests SET status='leased', updated_at=? WHERE id=?",
+                "UPDATE queue_jobs SET status='failed', finished_at=?, error='owner stopped' "
+                "WHERE request_id=? AND status='queued'",
                 (_now(), row["id"]),
             )
-            connection.execute(
-                "INSERT INTO queue_events(created_at, resource, request_id, event) "
-                "VALUES (?, ?, ?, 'leased')",
-                (_now(), resource, row["id"]),
-            )
+            if row["status"] == "leased":
+                connection.execute(
+                    "INSERT OR IGNORE INTO queue_resource_blocks VALUES (?, ?, ?, ?)",
+                    (row["resource"], row["id"], "owner_stopped", _now()),
+                )
 
 
 @dataclass(frozen=True)
@@ -1200,6 +1191,12 @@ class WorkflowStore:
                 """,
                 (target.value, adapter_reference, error, now, activated_at, workflow_id),
             )
+            if target in {
+                WorkflowStatus.COMPLETED,
+                WorkflowStatus.FAILED,
+                WorkflowStatus.CANCELLED,
+            }:
+                _cancel_queue_owners(connection, [workflow_id])
         return self.get(workflow_id)
 
     def claim_activation(self, workflow_id: str) -> str:
@@ -1568,6 +1565,10 @@ class WorkflowStore:
                         (_now(), *successor_ids),
                     )
                 _cancel_queue_owners(connection, [workflow_id, *successor_ids])
+            else:
+                # A role must never leave a live lease behind after terminal completion.
+                # Unknown external cleanup remains represented by a resource block.
+                _cancel_queue_owners(connection, [workflow_id])
             connection.execute(
                 "UPDATE agent_runs SET status=?, ended_at=? WHERE step_id=? AND status='running'",
                 (target.value, _now(), workflow_id),
@@ -1861,6 +1862,17 @@ class WorkflowStore:
         readiness_id = str(uuid.uuid4())
         try:
             with self._connect() as connection:
+                pending_queue = connection.execute(
+                    "SELECT 1 FROM queue_requests WHERE owner=? AND status IN ('waiting','leased') "
+                    "UNION SELECT 1 FROM queue_jobs j JOIN queue_requests q "
+                    "ON q.id=j.request_id JOIN queue_result_notifications n "
+                    "ON n.request_id=j.request_id WHERE q.owner=? AND n.acknowledged_at IS NULL",
+                    (workflow_id, workflow_id),
+                ).fetchone()
+                if pending_queue is not None:
+                    raise ValueError(
+                        "release queue requests and acknowledge job results before readiness"
+                    )
                 connection.execute(
                     """
                     INSERT INTO workflow_role_readiness(

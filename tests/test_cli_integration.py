@@ -5253,7 +5253,8 @@ def test_supervise_expires_dead_holder_lease_and_promotes(
     assert blocked["action"] == "blocked"
     assert "resource-timeout: lease" in blocked["reason"]
     assert queue.inspect(lease.request_id)["status"] == "cancelled"
-    assert queue.inspect(waiting.request_id)["status"] == "leased"
+    assert queue.inspect(waiting.request_id)["status"] == "waiting"
+    assert queue.blocks("heavy-check")[0]["request_id"] == lease.request_id
     assert root.service.store.get(waiter.id).status.value == "running"
 
 

@@ -154,16 +154,18 @@ def test_simultaneous_queue_acquire_by_one_owner_is_idempotent(tmp_path: Path) -
     assert queue.status("shared") == [{"resource": "shared", "status": "leased", "count": 1}]
 
 
-def test_cancelling_active_lease_promotes_the_next_request(tmp_path: Path) -> None:
+def test_cancelling_active_lease_blocks_until_cleanup_is_confirmed(tmp_path: Path) -> None:
     queue = ResourceQueue(tmp_path)
     first = queue.acquire("exclusive-check", "one")
     queue.acquire("exclusive-check", "two")
 
-    assert queue.cancel(first.lease_id or "")
+    assert queue.cancel(first.lease_id or "") is None
     assert queue.status("exclusive-check") == [
         {"resource": "exclusive-check", "status": "cancelled", "count": 1},
-        {"resource": "exclusive-check", "status": "leased", "count": 1},
+        {"resource": "exclusive-check", "status": "waiting", "count": 1},
     ]
+    assert queue.blocks("exclusive-check")[0]["request_id"] == first.request_id
+    assert queue.resolve(first.request_id, cleanup_confirmed=True)
 
 
 def test_waiting_request_can_be_cancelled_by_request_id(tmp_path: Path) -> None:
@@ -195,37 +197,52 @@ def test_cancel_owner_removes_waiting_and_leased_requests(tmp_path: Path) -> Non
     assert queue.inspect(waiting.request_id)["status"] == "leased"
 
 
-def test_cancel_owner_promotes_the_next_waiter(tmp_path: Path) -> None:
+def test_cancel_owner_keeps_the_next_waiter_parked(tmp_path: Path) -> None:
     queue = ResourceQueue(tmp_path)
     active = queue.acquire("shared", "workflow")
     waiting = queue.acquire("shared", "next")
 
-    assert queue.cancel_owner("workflow") == [waiting.request_id]
+    assert queue.cancel_owner("workflow") == []
     assert queue.inspect(active.request_id)["status"] == "cancelled"
-    assert queue.inspect(waiting.request_id)["status"] == "leased"
+    assert queue.inspect(waiting.request_id)["status"] == "waiting"
+    assert queue.resolve(active.request_id, cleanup_confirmed=True) == waiting.request_id
 
 
-def test_explicit_stale_recovery_promotes_fifo_request(tmp_path: Path) -> None:
+def test_workflow_completion_cannot_leave_an_unverified_lease_runnable(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    holder = store.create(tmp_path, "single", "holder", "Use rig.")
+    store.transition(holder.id, "starting")
+    store.transition(holder.id, "running")
+    waiter = store.create(tmp_path, "single", "waiter", "Use rig next.")
+    store.transition(waiter.id, "starting")
+    store.transition(waiter.id, "running")
+    queue = ResourceQueue(tmp_path)
+    first = queue.acquire("rig", holder.id)
+    second = queue.acquire("rig", waiter.id)
+
+    store.transition(holder.id, "completed")
+
+    assert queue.inspect(first.request_id)["status"] == "cancelled"
+    assert queue.inspect(second.request_id)["status"] == "waiting"
+    assert queue.blocks("rig")[0]["request_id"] == first.request_id
+
+
+def test_explicit_stale_recovery_only_reports_candidates(tmp_path: Path) -> None:
     queue = ResourceQueue(tmp_path)
     first = queue.acquire("exclusive-check", "one")
-    second = queue.acquire("exclusive-check", "two")
+    queue.acquire("exclusive-check", "two")
     with queue._connect() as connection:
         connection.execute(
             "UPDATE requests SET updated_at = ? WHERE id = ?",
             ("2000-01-01T00:00:00+00:00", first.request_id),
         )
 
-    assert queue.recover_stale(60) == [second.request_id]
+    assert queue.recover_stale(60) == [first.request_id]
     assert queue.status("exclusive-check") == [
-        {"resource": "exclusive-check", "status": "cancelled", "count": 1},
         {"resource": "exclusive-check", "status": "leased", "count": 1},
+        {"resource": "exclusive-check", "status": "waiting", "count": 1},
     ]
-    assert [event["event"] for event in queue.events()] == [
-        "leased",
-        "queued",
-        "recovered",
-        "leased",
-    ]
+    assert [event["event"] for event in queue.events()] == ["leased", "queued"]
 
 
 @pytest.mark.parametrize("max_age", [True, "60", float("nan"), float("inf"), 0, -1])

@@ -290,6 +290,39 @@ def test_review_attempt_model_reopens_fixed_roles_for_two_cycles(tmp_path: Path)
     assert store.get(reviewer.id).adapter_reference is None
 
 
+def test_role_readiness_waits_for_queue_job_result_ack(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    manager, _worker, _reviewer = store.create_orchestrated_plan(
+        tmp_path, "queued-ready", "Implement.", max_review_cycles=2
+    )
+    store.transition(manager.id, "starting")
+    store.transition(manager.id, "running", adapter_reference="manager")
+    queue = ResourceQueue(tmp_path)
+    job = queue.acquire(
+        "rig",
+        manager.id,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
+        worktree_path=str(tmp_path),
+    )
+    assert queue.claim_job(job.request_id) is not None
+    queue.finish_job(job.request_id, command_exit_code=0, check_exit_code=0)
+
+    def report():
+        return store.record_role_readiness(
+            manager.id,
+            summary="Checks passed.",
+            artifact_kind="plan",
+            artifact_sha256="a" * 64,
+            artifact_content="Plan.",
+        )
+
+    with pytest.raises(ValueError, match="acknowledge job results"):
+        report()
+    queue.acknowledge_result(job.request_id, manager.id)
+    assert report().workflow_id == manager.id
+
+
 def test_role_readiness_history_orders_cycles_without_artifact_bodies(tmp_path: Path) -> None:
     store = WorkflowStore(tmp_path)
     manager, worker, reviewer = store.create_orchestrated_plan(

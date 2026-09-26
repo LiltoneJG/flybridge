@@ -65,26 +65,26 @@ In orchestrated mode, multiple agents start in a hierarchy and divide the work a
 
 ## Sharing exclusive resources
 
-Parallel worktrees can still contend for a device, test rig, large build, or another operation that must run alone. Configure resource names in `queue.resources`; agents then acquire a lease before a conflicting operation and release it afterward. Flybridge grants leases in first-in, first-out order per resource. A waiting agent parks; Flybridge starts or restores its queue observer and delivers the granted lease so the agent can continue. Other worktrees remain free to run. A heavy verification run is one use case, not a special queue type.
+Parallel worktrees can still contend for a device, test rig, large build, or another operation that must run alone. Configure resource names in `queue.resources`; agents then acquire a lease before a conflicting operation and release it afterward. Flybridge grants leases in first-in, first-out order per resource. A waiting agent parks; the state-directory dispatcher delivers a promoted lease and retries until the agent acknowledges it. Fixed commands can use `queue run` with an executable cleanup check so Flybridge executes them after FIFO promotion. Other worktrees remain free to run. A heavy verification run is one use case, not a special queue type.
 
 ```mermaid
 sequenceDiagram
     participant A as Worktree A
     participant Q as Flybridge resource queue
     participant B as Worktree B
-    participant O as Queue observer
+    participant D as Queue dispatcher
     A->>Q: acquire device
     Q-->>A: lease granted
     B->>Q: acquire device
     Q-->>B: waiting, park
     A->>Q: release lease
     Q->>Q: promote oldest waiter
-    Q-->>O: lease granted to B
-    O-->>B: notify B (when enabled)
+    Q-->>D: lease granted to B
+    D-->>B: notify B until acknowledged
     B->>Q: release after use
 ```
 
-Use `queue status` for counts, `queue status --details` to identify active request IDs and owners, and `queue watch` for live events. Old leases are flagged for attention without being released; verify external cleanup before explicitly releasing or cancelling one. The queue tracks workflow ownership and survives CLI process exits. See the [resource queue contract](docs/en/specification.md#resource-queue-contract) for the lifecycle and recovery rules.
+Use `queue status` for counts, `queue status --details` to identify requests, delivery state, recovery blocks, and dispatcher health, and `queue watch` for live events. Old leases are flagged for attention without being released. Cancelling an unverified lease blocks its resource; confirm external cleanup and run `queue resolve --request ID --cleanup-confirmed` to admit the next waiter. See the [resource queue contract](docs/en/specification.md#resource-queue-contract) for the lifecycle and recovery rules.
 
 ## Optional GitHub Project workflow
 
