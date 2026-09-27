@@ -11,7 +11,17 @@ from .parser import build_parser
 
 def main(argv: list[str] | None = None) -> int:
     """Parse the public CLI and translate expected operational failures."""
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    separator = arguments.index("--") if "--" in arguments else -1
+    is_queue_run = any(
+        arguments[index : index + 2] == ["queue", "run"] for index in range(max(separator - 1, 0))
+    )
+    if separator >= 0 and is_queue_run:
+        args = parser.parse_args(arguments[:separator])
+        args.argv = arguments[separator + 1 :]
+    else:
+        args = parser.parse_args(arguments)
     handlers = {
         "queue": queue.handle,
         "workflow": workflow.handle,
