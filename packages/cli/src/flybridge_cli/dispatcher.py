@@ -39,11 +39,14 @@ def _lock_held(state_dir: Path) -> bool:
 
 def dispatcher_status(queue: ResourceQueue) -> dict[str, object]:
     with queue._connect() as connection:
-        row = connection.execute("SELECT * FROM queue_dispatcher_state WHERE singleton=1").fetchone()
+        row = connection.execute(
+            "SELECT * FROM queue_dispatcher_state WHERE singleton=1"
+        ).fetchone()
     result = dict(row) if row is not None else {}
     heartbeat = result.get("heartbeat_at")
     result["running"] = bool(
-        heartbeat and datetime.fromisoformat(str(heartbeat)) > datetime.now(UTC) - timedelta(seconds=5)
+        heartbeat
+        and datetime.fromisoformat(str(heartbeat)) > datetime.now(UTC) - timedelta(seconds=5)
     )
     return result
 
@@ -62,8 +65,16 @@ def ensure_dispatcher(config_path: Path, state_dir: Path) -> None:
             pass
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     child = subprocess.Popen(
-        [sys.executable, "-m", "flybridge_cli.main", "--config", str(config_path),
-         "queue", "dispatcher", "serve"],
+        [
+            sys.executable,
+            "-m",
+            "flybridge_cli.main",
+            "--config",
+            str(config_path),
+            "queue",
+            "dispatcher",
+            "serve",
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -101,7 +112,11 @@ class QueueDispatcher:
             record = self.store.get(owner_id)
         except ValueError:
             return None, "invalid"
-        if record.status != WorkflowStatus.RUNNING or not record.adapter_reference or not record.terminal_handle:
+        if (
+            record.status != WorkflowStatus.RUNNING
+            or not record.adapter_reference
+            or not record.terminal_handle
+        ):
             return record, "invalid"
         try:
             valid = self.client.terminal_is_valid(record.adapter_reference, record.terminal_handle)
@@ -124,8 +139,10 @@ class QueueDispatcher:
         for item in self.queue.delivery_candidates():
             request_id = str(item["request_id"])
             prompt = render_lease_grant_prompt(
-                resource=str(item["resource"]), request_id=request_id,
-                lease_id=request_id, workflow_id=str(item["owner"]),
+                resource=str(item["resource"]),
+                request_id=request_id,
+                lease_id=request_id,
+                workflow_id=str(item["owner"]),
                 config_path=self.config.path,
             )
             error = self._send(str(item["owner"]), prompt)
@@ -137,10 +154,18 @@ class QueueDispatcher:
     def _deliver_results(self) -> None:
         for item in self.queue.result_candidates():
             request_id = str(item["request_id"])
-            acknowledge = shlex.join([
-                "flybridge", "--config", str(self.config.path), "queue", "ack-result",
-                request_id, "--owner", str(item["owner"]),
-            ])
+            acknowledge = shlex.join(
+                [
+                    "flybridge",
+                    "--config",
+                    str(self.config.path),
+                    "queue",
+                    "ack-result",
+                    request_id,
+                    "--owner",
+                    str(item["owner"]),
+                ]
+            )
             prompt = (
                 f"Flybridge queue job {request_id} finished with status {item['status']}. "
                 f"Command exit: {item['command_exit_code']}; cleanup check exit: "
@@ -166,8 +191,11 @@ class QueueDispatcher:
                     continue
             if record is not None and record.status == WorkflowStatus.RUNNING:
                 try:
-                    self.store.transition(record.id, WorkflowStatus.FAILED,
-                                          error="resource owner terminal unavailable")
+                    self.store.transition(
+                        record.id,
+                        WorkflowStatus.FAILED,
+                        error="resource owner terminal unavailable",
+                    )
                 except ValueError:
                     pass
 
@@ -176,31 +204,34 @@ class QueueDispatcher:
         argv = json.loads(str(item["argv_json"]))
         cwd = str(item["worktree_path"])
         env = os.environ.copy()
-        env.update({
-            "FLYBRIDGE_QUEUE_RESOURCE": str(item["resource"]),
-            "FLYBRIDGE_QUEUE_OWNER": str(item["owner"]),
-            "FLYBRIDGE_QUEUE_REQUEST_ID": request_id,
-        })
+        env.update(
+            {
+                "FLYBRIDGE_QUEUE_RESOURCE": str(item["resource"]),
+                "FLYBRIDGE_QUEUE_OWNER": str(item["owner"]),
+                "FLYBRIDGE_QUEUE_REQUEST_ID": request_id,
+            }
+        )
         command_exit = 127
         check_exit = None
         error = None
         try:
-            completed = subprocess.run(argv, cwd=cwd, env=env, check=False,
-                                       start_new_session=True)
+            completed = subprocess.run(argv, cwd=cwd, env=env, check=False, start_new_session=True)
             command_exit = completed.returncode
         except (OSError, ValueError) as exc:
             error = f"command launch failed: {exc}"
         try:
-            completed = subprocess.run([str(item["cleanup_check"])], cwd=cwd,
-                                       env=env, check=False, start_new_session=True)
+            completed = subprocess.run(
+                [str(item["cleanup_check"])], cwd=cwd, env=env, check=False, start_new_session=True
+            )
             check_exit = completed.returncode
         except (OSError, ValueError) as exc:
             error = f"cleanup check failed to launch: {exc}"
         # A launch failure is safe to release only when the explicit check proves it.
         if check_exit == 0:
             error = None
-        self.queue.finish_job(request_id, command_exit_code=command_exit,
-                              check_exit_code=check_exit, error=error)
+        self.queue.finish_job(
+            request_id, command_exit_code=command_exit, check_exit_code=check_exit, error=error
+        )
 
     def serve(self) -> int:
         with _lock_path(self.config.state_dir).open("a+b") as lock_file:
@@ -218,8 +249,10 @@ class QueueDispatcher:
                             if future.done():
                                 try:
                                     future.result()
-                                except Exception as exc:
-                                    self.queue.abandon_job(request_id, f"job executor failed: {exc}")
+                                except Exception as exc:  # noqa: BLE001 - unknown job errors require recovery
+                                    self.queue.abandon_job(
+                                        request_id, f"job executor failed: {exc}"
+                                    )
                                 del running[request_id]
                         self._check_dead_owners()
                         for item in self.queue.queued_jobs():

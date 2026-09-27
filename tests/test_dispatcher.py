@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from conftest import write_config
 from flybridge_cli.dispatcher import QueueDispatcher
 from flybridge_cli.main import main
@@ -106,7 +105,10 @@ def test_dead_owner_during_running_job_is_failed_and_stays_blocked(tmp_path: Pat
     owner = _running(store, tmp_path, "owner")
     waiter = _running(store, tmp_path, "waiter")
     first = queue.acquire(
-        "rig", owner, job_argv=["checker"], cleanup_check="/tmp/prove-clean",
+        "rig",
+        owner,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
         worktree_path=str(tmp_path),
     )
     waiting = queue.acquire("rig", waiter)
@@ -125,8 +127,11 @@ def test_job_releases_only_after_cleanup_proof_and_reports_command_failure(tmp_p
     owner = _running(store, tmp_path, "owner")
     waiter = _running(store, tmp_path, "waiter")
     job = queue.acquire(
-        "rig", owner, job_argv=["checker", "--all"],
-        cleanup_check="/tmp/prove-clean", worktree_path=str(tmp_path),
+        "rig",
+        owner,
+        job_argv=["checker", "--all"],
+        cleanup_check="/tmp/prove-clean",
+        worktree_path=str(tmp_path),
     )
     waiting = queue.acquire("rig", waiter)
     calls: list[list[str]] = []
@@ -162,7 +167,10 @@ def test_unverified_job_and_crashed_dispatcher_block_fifo(tmp_path: Path) -> Non
     owner = _running(store, tmp_path, "owner")
     waiter = _running(store, tmp_path, "waiter")
     first = queue.acquire(
-        "rig", owner, job_argv=["checker"], cleanup_check="/tmp/prove-clean",
+        "rig",
+        owner,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
         worktree_path=str(tmp_path),
     )
     waiting = queue.acquire("rig", waiter)
@@ -179,7 +187,10 @@ def test_failed_cleanup_proof_blocks_next_job(tmp_path: Path) -> None:
     owner = _running(store, tmp_path, "owner")
     waiter = _running(store, tmp_path, "waiter")
     first = queue.acquire(
-        "rig", owner, job_argv=["checker"], cleanup_check="/tmp/prove-clean",
+        "rig",
+        owner,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
         worktree_path=str(tmp_path),
     )
     waiting = queue.acquire("rig", waiter)
@@ -194,7 +205,10 @@ def test_successful_proof_releases_an_abandoned_owner_without_replaying(tmp_path
     owner = _running(store, tmp_path, "owner")
     waiter = _running(store, tmp_path, "waiter")
     first = queue.acquire(
-        "rig", owner, job_argv=["checker"], cleanup_check="/tmp/prove-clean",
+        "rig",
+        owner,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
         worktree_path=str(tmp_path),
     )
     waiting = queue.acquire("rig", waiter)
@@ -202,7 +216,10 @@ def test_successful_proof_releases_an_abandoned_owner_without_replaying(tmp_path
     queue.cancel_owner(owner)
     assert queue.blocks("rig")
 
-    assert queue.finish_job(first.request_id, command_exit_code=0, check_exit_code=0) == waiting.request_id
+    assert (
+        queue.finish_job(first.request_id, command_exit_code=0, check_exit_code=0)
+        == waiting.request_id
+    )
     assert queue.blocks("rig") == []
     assert queue.inspect(waiting.request_id)["status"] == "leased"
 
@@ -211,7 +228,10 @@ def test_single_report_waits_for_job_result_ack(tmp_path: Path) -> None:
     _dispatcher, queue, store, _runtime = _setup(tmp_path)
     owner = _running(store, tmp_path, "owner")
     job = queue.acquire(
-        "rig", owner, job_argv=["checker"], cleanup_check="/tmp/prove-clean",
+        "rig",
+        owner,
+        job_argv=["checker"],
+        cleanup_check="/tmp/prove-clean",
         worktree_path=str(tmp_path),
     )
     assert queue.claim_job(job.request_id) is not None
@@ -233,10 +253,25 @@ def test_queue_run_cli_registers_an_argv_without_starting_a_real_service(
     proof.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     proof.chmod(0o700)
 
-    assert main([
-        "--config", str(dispatcher.config.path), "queue", "run", "rig", "--owner",
-        owner, "--cleanup-check", str(proof), "--", "checker", "--all",
-    ]) == 0
+    assert (
+        main(
+            [
+                "--config",
+                str(dispatcher.config.path),
+                "queue",
+                "run",
+                "rig",
+                "--owner",
+                owner,
+                "--cleanup-check",
+                str(proof),
+                "--",
+                "checker",
+                "--all",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["granted"] is True
     claimed = queue.claim_job(payload["request_id"])
@@ -250,7 +285,9 @@ def test_version_three_queue_state_migrates_in_place(tmp_path: Path) -> None:
     lease = queue.acquire("rig", owner)
     with sqlite3.connect(queue.path) as connection:
         for table in (
-            "queue_dispatcher_state", "queue_result_notifications", "queue_jobs",
+            "queue_dispatcher_state",
+            "queue_result_notifications",
+            "queue_jobs",
             "queue_resource_blocks",
         ):
             connection.execute(f"DROP TABLE {table}")
