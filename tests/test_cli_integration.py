@@ -14,7 +14,7 @@ from flybridge_cli.runtime import _coordinator_command, _generated_workflow_name
 from flybridge_core import ResourceQueue, WorkflowArtifactStore, WorkflowStore
 from flybridge_github import GitHubProjectError, GitHubPullRequestError
 from flybridge_github.project import Candidate
-from flybridge_orca.client import StartedWorkflow
+from flybridge_orca.client import OrcaClient, StartedWorkflow
 
 ISSUE_URL = "https://github.com/example/repo/issues/1"
 
@@ -4827,6 +4827,8 @@ def test_declared_role_blocker_terminates_each_orchestrated_stage(
         assert root.service.store.get(worker.id).external_reconciled_at is not None
     if blocked_role == "manager":
         assert "progress_push" not in result
+        assert result["salvage_push"]["pushed"] is False
+        assert result["salvage_push"]["skip_reason"] == "no_worker_worktree"
     else:
         assert result["progress_push"]["pushed"]["remote"] == "origin"
         assert root.client_cls.pushed
@@ -5468,3 +5470,243 @@ def test_supervise_completed_run_pushes_from_manager(tmp_path: Path, capsys, mon
     assert completed["action"] == "completed"
     assert completed["delivery"]["pushed"]["remote"] == "origin"
     assert root.client_cls.pushed
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_salvage_repo(path: Path) -> str:
+    path.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main"], cwd=path, check=True, capture_output=True
+    )
+    _git(path, "config", "user.email", "salvage@example.invalid")
+    _git(path, "config", "user.name", "Salvage")
+    (path / "README.md").write_text("start\n", encoding="utf-8")
+    _git(path, "add", "README.md")
+    _git(path, "commit", "-m", "start")
+    remote = path.parent / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    _git(path, "remote", "add", "origin", str(remote))
+    _git(path, "push", "-u", "origin", "HEAD")
+    return _git(path, "rev-parse", "HEAD")
+
+
+def _prepare_salvage_case(repo: Path, start: str, case: str) -> str:
+    if case == "no_implementation_commits":
+        return start
+    if case == "rewritten_history":
+        _git(repo, "checkout", "--orphan", "rewritten")
+        (repo / "rewritten.txt").write_text("rewritten\n", encoding="utf-8")
+        _git(repo, "add", "rewritten.txt")
+        _git(repo, "commit", "-m", "rewritten")
+        return _git(repo, "rev-parse", "HEAD")
+    (repo / "change.txt").write_text("change\n", encoding="utf-8")
+    _git(repo, "add", "change.txt")
+    _git(repo, "commit", "-m", "change")
+    head = _git(repo, "rev-parse", "HEAD")
+    if case == "dirty":
+        (repo / "change.txt").write_text("dirty\n", encoding="utf-8")
+    elif case == "already_published":
+        _git(repo, "push", "origin", "HEAD")
+    elif case != "clean":
+        raise AssertionError(case)
+    return head
+
+
+def _salvage_watchdog_client(events: list[str]):
+    class SalvageWatchdogClient:
+        def __init__(self, _executable: str) -> None:
+            self.git = OrcaClient("git")
+
+        def salvage_candidate(self, path: str, start_sha: str | None):
+            return self.git.salvage_candidate(path, start_sha)
+
+        def push_fast_forward(self, path: str):
+            events.append("push")
+            return self.git.push_fast_forward(path)
+
+        def close_terminals(self, *_args):
+            events.append("close")
+            return {"closed": True}
+
+        def set_lifecycle(self, *_args, **_kwargs):
+            return None
+
+        def uncommitted_changes(self, path: str):
+            return self.git.uncommitted_changes(path)
+
+    return SalvageWatchdogClient
+
+
+def _run_single_timeout(tmp_path: Path, capsys, monkeypatch, *, start_sha: str, repo: Path):
+    state_dir = tmp_path / "state"
+    config_path = tmp_path / "config.jsonc"
+    write_config(config_path, state_dir=state_dir, timeouts={"role_seconds": 1})
+    store = WorkflowStore(state_dir)
+    workflow = store.create(repo, "single", "single-salvage", "Implement.")
+    store.transition(workflow.id, "starting")
+    store.attach_external(
+        workflow.id,
+        adapter_reference="repo::single",
+        worktree_path=str(repo),
+        terminal_handle="term-single",
+        implementation_repository="example/repo",
+        runtime_repository_id="repo",
+        start_sha=start_sha,
+    )
+    store.transition(workflow.id, "running")
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE workflows SET activated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", workflow.id),
+        )
+    events: list[str] = []
+    _install_orca(monkeypatch, _salvage_watchdog_client(events))
+    assert main(["--config", str(config_path), "workflow", "supervise", "--once", workflow.id]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    return workflow.id, config_path, events, payload
+
+
+def test_single_timeout_pushes_clean_descendant_before_close(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    start = _init_salvage_repo(repo)
+    head = _prepare_salvage_case(repo, start, "clean")
+    workflow_id, config_path, events, payload = _run_single_timeout(
+        tmp_path, capsys, monkeypatch, start_sha=start, repo=repo
+    )
+
+    assert payload["action"] == "blocked"
+    assert payload["reason"] == "role-timeout"
+    assert events[0] == "push"
+    assert "close" in events
+    assert events.index("push") < events.index("close")
+    assert payload["salvage_push"]["pushed"] is True
+    assert payload["salvage_push"]["sha"] == head
+    assert payload["salvage_push"]["skip_reason"] is None
+    assert payload["progress_push"]["pushed"]["remote"] == "origin"
+    assert _git(tmp_path / "origin.git", "rev-parse", "refs/heads/main") == head
+    assert WorkflowStore(tmp_path / "state").get(workflow_id).status.value == "cancelled"
+    assert main(["--config", str(config_path), "workflow", "status", workflow_id]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["salvage_push"]["sha"] == head
+    assert status["salvage_push"]["pushed"] is True
+    assert status["salvage_push"]["error"] is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["dirty", "no_implementation_commits", "rewritten_history", "already_published"],
+)
+def test_single_timeout_skips_unsalvageable_heads(
+    tmp_path: Path, capsys, monkeypatch, case: str
+) -> None:
+    repo = tmp_path / "repo"
+    start = _init_salvage_repo(repo)
+    _prepare_salvage_case(repo, start, case)
+    _workflow_id, _config_path, events, payload = _run_single_timeout(
+        tmp_path, capsys, monkeypatch, start_sha=start, repo=repo
+    )
+
+    assert payload["action"] == "blocked"
+    assert "push" not in events
+    assert events[0] == "close"
+    assert payload["salvage_push"]["pushed"] is False
+    assert payload["salvage_push"]["skip_reason"] == case
+    assert payload["salvage_push"]["error"] is None
+    assert "progress_push" not in payload
+    published = _git(repo, "rev-parse", "HEAD") if case == "already_published" else start
+    assert _git(tmp_path / "origin.git", "rev-parse", "refs/heads/main") == published
+
+
+def test_unowned_worker_timeout_harvests_and_pushes_before_close(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = _autonomous_root(tmp_path, capsys, monkeypatch, timeouts={"role_seconds": 3600})
+    manager = root.service.store.get(root.manager_id)
+    worker, _reviewer = root.service.store.children(root.manager_id)
+    root.ready(manager.id, "plan", "Plan.", "Implement the plan.")
+    assert root.supervise()["action"] == "launched-worker"
+    root.repository_head["sha"] = "sha-1"
+    with root.service.store._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO workflow_worktree_ownership(workflow_id, owns_worktree) VALUES (?, 0)
+            ON CONFLICT(workflow_id) DO UPDATE SET owns_worktree = 0
+            """,
+            (worker.id,),
+        )
+        connection.execute(
+            "UPDATE workflows SET activated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", worker.id),
+        )
+    events: list[str] = []
+    original_push = root.client_cls.push_fast_forward
+    original_close = root.client_cls.close_terminals
+
+    def push(self, path):
+        events.append("push")
+        return original_push(self, path)
+
+    def close(self, worktree_id, handle):
+        events.append("close")
+        return original_close(self, worktree_id, handle)
+
+    root.client_cls.push_fast_forward = push
+    root.client_cls.close_terminals = close
+    result = root.supervise()
+
+    assert result["action"] == "blocked"
+    assert result["reason"] == "role-timeout"
+    assert result["salvage_push"]["pushed"] is True
+    assert result["salvage_push"]["sha"] == "sha-1"
+    assert result["progress_push"]["pushed"]["remote"] == "origin"
+    assert events[0] == "push"
+    assert events.index("push") < events.index("close")
+    finished = root.service.store.get(worker.id)
+    assert finished.owns_worktree is False
+    assert finished.external_reconciled_at is not None
+    assert main(["--config", str(root.config_path), "workflow", "status", root.manager_id]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["salvage_push"]["pushed"] is True
+    assert status["salvage_push"]["sha"] == "sha-1"
+
+
+def test_merge_harvest_is_not_pushed_on_timeout(tmp_path: Path, capsys, monkeypatch) -> None:
+    root = _autonomous_root(tmp_path, capsys, monkeypatch, timeouts={"role_seconds": 3600})
+    manager = root.service.store.get(root.manager_id)
+    worker, _reviewer = root.service.store.children(root.manager_id)
+    root.ready(manager.id, "plan", "Plan.", "Implement the plan.")
+    assert root.supervise()["action"] == "launched-worker"
+    root.repository_head["sha"] = "sha-1"
+
+    def integrate(_self, *_args, **_kwargs):
+        return {"method": "merge", "before": "sha-0", "after": "sha-1"}
+
+    root.client_cls.integrate_worker_commit = integrate
+    events: list[str] = []
+    root.client_cls.push_fast_forward = lambda *_args, **_kwargs: events.append("push")
+    with root.service.store._connect() as connection:
+        connection.execute(
+            "UPDATE workflows SET activated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", worker.id),
+        )
+    result = root.supervise()
+
+    assert result["action"] == "blocked"
+    assert result["reason"] == "role-timeout"
+    assert result["salvage_push"]["pushed"] is False
+    assert result["salvage_push"]["skip_reason"] == "merge"
+    assert result["salvage_push"]["sha"] == "sha-1"
+    assert result["salvage_push"]["error"] is None
+    assert "progress_push" not in result
+    assert events == []

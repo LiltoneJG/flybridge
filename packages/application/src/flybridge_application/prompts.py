@@ -25,7 +25,9 @@ ROLE_RESPONSIBILITIES = {
     ),
     WorkflowRole.WORKER: (
         "Implement the approved plan and provide concise verification evidence for review. "
-        "Do not push from this worktree."
+        "Commit only after local verification passes. Do not push from this worktree. "
+        "If this role times out, the supervisor fast-forward-pushes only a clean descendant "
+        "commit and does not commit a dirty worktree."
     ),
     WorkflowRole.REVIEWER: (
         "Review the implementation and report an approval or requested changes. "
@@ -34,7 +36,9 @@ ROLE_RESPONSIBILITIES = {
     ),
     WorkflowRole.SINGLE: (
         "Complete the objective directly, including any requested local self-review, "
-        "and report the result. After local verification passes, push once from this worktree."
+        "and report the result. Commit only after local verification passes, then push once "
+        "from this worktree. If this role times out, the supervisor fast-forward-pushes only "
+        "a clean descendant commit and does not commit a dirty worktree."
     ),
 }
 
@@ -167,7 +171,9 @@ def _operator_lifecycle(role: WorkflowRole, workflow_id: str, config_path: Path 
             "readiness. Do not run "
             "`role-ready --outcome blocked` for queue wait. "
             "Never create a pull request. Manager and reviewer roles never push. The worker never "
-            "pushes; the coordinator pushes the approved tip from the manager worktree."
+            "pushes; the coordinator pushes the approved tip from the manager worktree. "
+            "If a role times out, the supervisor fast-forward-pushes only a clean descendant "
+            "commit and does not commit a dirty worktree."
             f"{parked_manager}"
         )
     return (
@@ -175,7 +181,9 @@ def _operator_lifecycle(role: WorkflowRole, workflow_id: str, config_path: Path 
         "`complete` closes this role's owned terminals, so the role that runs it cannot continue. "
         "`workflow artifact put` and `workflow role-ready` are orchestrated-only; do not run "
         "them from a single role. "
-        "Commit required work and, after local verification passes, push once from this worktree. "
+        "Commit only after local verification passes, then push once from this worktree. "
+        "If this role times out, the supervisor fast-forward-pushes only a clean descendant "
+        "commit and does not commit a dirty worktree. "
         "Report the result or blocker using "
         f"`{_queue_cli(config_path)} workflow single-report {workflow_id or '<workflow-id>'} "
         '--outcome done|blocked --summary "ONE LINE RESULT"`, then stop. '
@@ -215,8 +223,10 @@ ROLE_BRANCH_CONTINUITY = {
     ),
     WorkflowRole.WORKER: (
         "Flybridge creates the reviewer's worktree from this branch, so only committed work "
-        "reaches the review. Commit the implementation on this branch before reporting ready "
-        "or blocked, and leave no other modified or untracked file behind."
+        "reaches the review. Commit only after local verification passes, on this branch, "
+        "before reporting ready or blocked, and leave no other modified or untracked file "
+        "behind. If this role times out, the supervisor fast-forward-pushes only a clean "
+        "descendant commit and does not commit a dirty worktree."
     ),
     WorkflowRole.REVIEWER: (
         "This worktree was created from the worker's branch, so the implementation under review "

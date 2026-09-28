@@ -3148,6 +3148,28 @@ def test_schema_migrates_activated_at_from_version_1(tmp_path: Path) -> None:
     assert reopened.get(workflow.id).activated_at is None
 
 
+def test_schema_migrates_salvage_pushes_from_version_4(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    workflow = store.create(tmp_path, "single", "salvage", "Implement.")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DROP INDEX IF EXISTS workflow_salvage_push_order")
+        connection.execute("DROP TABLE workflow_salvage_pushes")
+        connection.execute("PRAGMA user_version = 4")
+        connection.commit()
+
+    reopened = WorkflowStore(tmp_path)
+    with reopened._connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    assert "workflow_salvage_pushes" in names
+    recorded = reopened.record_salvage_push(
+        workflow.id, sha="abc", pushed=False, skip_reason="dirty", error=None
+    )
+    assert recorded["pushed"] is False
+    assert recorded["skip_reason"] == "dirty"
+    assert reopened.latest_salvage_push(workflow.id)["sha"] == "abc"
+
+
 def test_complete_activation_records_activated_at(tmp_path: Path) -> None:
     store = WorkflowStore(tmp_path)
     workflow = store.create(tmp_path, "single", "timed", "Implement.")

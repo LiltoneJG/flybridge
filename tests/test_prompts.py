@@ -102,7 +102,7 @@ def test_orchestrated_prompts_state_that_only_committed_work_reaches_the_next_ro
     )
 
     assert "Branch continuity:" in worker
-    assert "Commit the implementation on this branch" in worker
+    assert "Commit only after local verification passes, on this branch" in worker
     assert "commit history of this branch" in reviewer
     assert "Branch continuity:" not in single
     assert "Branch continuity:" in resumed_worker
@@ -387,6 +387,10 @@ def test_prompts_inject_best_effort_link_guidance_for_single_manager_and_worker(
     assert "coordinator pushes" in manager
     assert "worker never pushes" in worker
     assert "push once from this worktree" in single
+    assert "Commit only after local verification passes" in single
+    assert "Commit only after local verification passes" in worker
+    assert "fast-forward-pushes only a clean descendant" in single
+    assert "fast-forward-pushes only a clean descendant" in worker
     assert f"{cli} workflow status manager-1" in manager
     assert f"{cli} workflow artifact show manager-1 --kind KIND" in manager
     assert f"{cli} workflow harvest manager-1" in manager

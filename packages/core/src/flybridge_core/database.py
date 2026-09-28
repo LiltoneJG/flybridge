@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -424,7 +424,19 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE UNIQUE INDEX workflow_owned_adapter_reference ON workflows(adapter_reference) WHERE adapter_reference IS NOT NULL AND external_reconciled_at IS NULL",
     "CREATE INDEX workflow_run_steps ON workflows(run_id, role, slot, attempt)",
     "CREATE INDEX workflow_manager_role ON workflows(parent_id, role)",
+    """
+    CREATE TABLE workflow_salvage_pushes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id),
+        sha TEXT,
+        pushed INTEGER NOT NULL CHECK(pushed IN (0, 1)),
+        skip_reason TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
     "CREATE INDEX workflow_handoff_target ON workflow_handoffs(target_workflow_id)",
+    "CREATE INDEX workflow_salvage_push_order ON workflow_salvage_pushes(workflow_id, id)",
     "CREATE UNIQUE INDEX workflow_artifact_path ON workflow_artifacts(relative_path)",
     "CREATE INDEX request_order ON queue_requests(resource, status, created_at, id)",
     "CREATE UNIQUE INDEX one_resource_lease ON queue_requests(resource) WHERE status = 'leased'",
@@ -606,7 +618,19 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 4")
-        return 4
+        version = 4
+    if version == 4:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE workflow_salvage_pushes" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+            elif "CREATE INDEX workflow_salvage_push_order" in statement:
+                connection.execute(
+                    statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 5")
+        return 5
     return version
 
 

@@ -924,6 +924,7 @@ class WorkflowService:
         *,
         error: str | None = None,
         close_external: Callable[[str, str | None], None] | None = None,
+        close_resources: bool = True,
     ) -> WorkflowRecord:
         try:
             target = WorkflowStatus(target)
@@ -967,15 +968,26 @@ class WorkflowService:
             affected.extend(self.store.cancel_requested_successors(workflow_id))
         self._cancel_owned_requests(affected)
         finished = self.store.get(finished.id)
+        if close_resources:
+            finished = self.close_cancelled_resources(finished.id, close_external)
+        return finished
+
+    def close_cancelled_resources(
+        self,
+        workflow_id: str,
+        close_external: Callable[[str, str | None], None] | None,
+    ) -> WorkflowRecord:
+        """Reconcile an attach-existing worktree and close terminals after salvage."""
+        workflow = self.store.get(workflow_id)
         if (
-            target in {WorkflowStatus.FAILED, WorkflowStatus.CANCELLED}
-            and not finished.owns_worktree
-            and finished.adapter_reference
-            and finished.external_reconciled_at is None
+            workflow.status in {WorkflowStatus.FAILED, WorkflowStatus.CANCELLED}
+            and not workflow.owns_worktree
+            and workflow.adapter_reference
+            and workflow.external_reconciled_at is None
         ):
-            finished = self.store.mark_external_reconciled(finished.id)
-        self._close_finished_terminals(finished, close_external)
-        return self.store.get(finished.id)
+            workflow = self.store.mark_external_reconciled(workflow.id)
+        self._close_finished_terminals(workflow, close_external)
+        return self.store.get(workflow.id)
 
     def retry_failed(self, workflow_id: str) -> WorkflowRecord:
         """Discard any pre-failure queue ownership before making a retry runnable."""
@@ -1347,24 +1359,103 @@ class WorkflowService:
         pushed = runtime.push_fast_forward(root.worktree_path)
         return {"harvested": harvested, "check": check, "pushed": pushed}
 
-    def try_progress_push(
-        self, workflow_id: str, runtime: WorkflowRuntime
-    ) -> dict[str, object] | None:
-        """Fast-forward push a verified blocked/failed tip once. Never force-push."""
+    def _classify_salvage(
+        self, runtime: WorkflowRuntime, workflow: WorkflowRecord
+    ) -> dict[str, str | None]:
+        """Use the runtime classifier, or a fake-safe descendant check when it is absent."""
+        path = workflow.worktree_path or ""
+        classifier = getattr(runtime, "salvage_candidate", None)
+        if callable(classifier):
+            classified = classifier(path, workflow.start_sha)
+            return {"sha": classified.get("sha"), "skip_reason": classified.get("skip_reason")}
+        if not workflow.start_sha:
+            return {"sha": None, "skip_reason": "no_start_sha"}
+        if not workflow.adapter_reference:
+            return {"sha": None, "skip_reason": "no_worktree"}
+        if runtime.uncommitted_changes(path):
+            return {"sha": None, "skip_reason": "dirty"}
+        _repository, _runtime_id, sha = runtime.implementation_identity(
+            workflow.adapter_reference, path
+        )
+        if not sha:
+            return {"sha": None, "skip_reason": "no_head"}
+        if sha == workflow.start_sha:
+            return {"sha": sha, "skip_reason": "no_implementation_commits"}
+        return {"sha": sha, "skip_reason": None}
+
+    def _record_salvage(
+        self,
+        workflow_id: str,
+        *,
+        sha: str | None,
+        pushed: bool,
+        skip_reason: str | None,
+        error: str | None,
+        push: dict[str, object] | None,
+    ) -> dict[str, object]:
+        recorded = self.store.record_salvage_push(
+            workflow_id,
+            sha=sha,
+            pushed=pushed,
+            skip_reason=skip_reason,
+            error=error,
+        )
+        recorded["push"] = push
+        return recorded
+
+    def salvage_progress(self, workflow_id: str, runtime: WorkflowRuntime) -> dict[str, object]:
+        """Fast-forward push one clean descendant. Never commit dirty work or force-push.
+
+        Single mode pushes that worktree. Orchestrated mode harvests the worker into the
+        manager first and pushes the manager only when the harvest fast-forwards.
+        """
         root = self._root_workflow(workflow_id)
-        if root.mode != WorkflowMode.ORCHESTRATED or not root.worktree_path:
-            return None
+        sha: str | None = None
+        skip_reason: str | None = None
+        error: str | None = None
+        push: dict[str, object] | None = None
         try:
-            harvested = self.harvest(root.id, runtime)
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return None
-        if harvested.skip_reason or harvested.method not in {"ff", "already"}:
-            return None
-        try:
-            pushed = runtime.push_fast_forward(root.worktree_path)
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return None
-        return {"harvested": harvested, "pushed": pushed}
+            if root.mode == WorkflowMode.ORCHESTRATED:
+                harvested = self.harvest(root.id, runtime)
+                sha = harvested.worker_sha
+                if harvested.skip_reason:
+                    skip_reason = harvested.skip_reason
+                elif harvested.method == "merge":
+                    skip_reason = "merge"
+                elif harvested.method not in {"ff", "already"}:
+                    skip_reason = harvested.method or "not_fast_forward"
+                elif not root.worktree_path:
+                    skip_reason = "no_worktree"
+                else:
+                    candidate = self._classify_salvage(runtime, root)
+                    sha = candidate["sha"] or harvested.after or sha
+                    skip_reason = candidate["skip_reason"]
+            elif not root.worktree_path:
+                skip_reason = "no_worktree"
+            else:
+                candidate = self._classify_salvage(runtime, root)
+                sha = candidate["sha"]
+                skip_reason = candidate["skip_reason"]
+            if error is None and skip_reason is None:
+                if not sha or not root.worktree_path:
+                    skip_reason = "no_head"
+                else:
+                    push = runtime.push_fast_forward(root.worktree_path)
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            error = str(exc)
+            push = None
+        return self._record_salvage(
+            root.id,
+            sha=sha,
+            pushed=push is not None,
+            skip_reason=None if error else skip_reason,
+            error=error,
+            push=push,
+        )
+
+    def try_progress_push(self, workflow_id: str, runtime: WorkflowRuntime) -> dict[str, object]:
+        """Record a salvage push. Failures stay on the result instead of disappearing."""
+        return self.salvage_progress(workflow_id, runtime)
 
     def _close_role_resources(
         self,

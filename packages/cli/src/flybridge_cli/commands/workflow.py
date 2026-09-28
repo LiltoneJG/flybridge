@@ -689,8 +689,24 @@ def _age_seconds(timestamp: str | None) -> float | None:
     return (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()
 
 
+def _attach_salvage(result: dict[str, object], salvage: dict[str, object]) -> None:
+    result["salvage_push"] = {
+        key: salvage[key]
+        for key in ("workflow_id", "sha", "pushed", "skip_reason", "error", "created_at")
+    }
+    push = salvage.get("push")
+    if push:
+        result["progress_push"] = {"pushed": push}
+
+
 def _timeout_block(service: WorkflowService, client, workflow, reason: str) -> dict[str, object]:
-    """Stop a running role, keep commits, and block the aggregate run when orchestrated."""
+    """Block a running role and fast-forward push a clean descendant before closing terminals."""
+    root_id = workflow.id if workflow.parent_id is None else workflow.parent_id
+    if workflow.mode == WorkflowMode.ORCHESTRATED:
+        if root_id is None:
+            raise ValueError("orchestrated role has no root manager")
+        service.store.set_orchestration_outcome(root_id, "blocked", error=reason)
+    salvage = service.salvage_progress(root_id or workflow.id, client)
     if workflow.status == WorkflowStatus.RUNNING:
         service.finish(
             workflow.id,
@@ -700,10 +716,8 @@ def _timeout_block(service: WorkflowService, client, workflow, reason: str) -> d
             close_external=client.close_terminals,
         )
     if workflow.mode == WorkflowMode.ORCHESTRATED:
-        root_id = workflow.id if workflow.parent_id is None else workflow.parent_id
         if root_id is None:
             raise ValueError("orchestrated role has no root manager")
-        service.store.set_orchestration_outcome(root_id, "blocked", error=reason)
         service.release_coordinator(root_id, "orchestration_blocked")
         run = service.store.orchestration_run(root_id)
         result = {
@@ -712,12 +726,12 @@ def _timeout_block(service: WorkflowService, client, workflow, reason: str) -> d
             "reason": reason,
             "run": asdict(run),
         }
-        progress = service.try_progress_push(root_id, client)
-        if progress is not None:
-            result["progress_push"] = {"pushed": progress["pushed"]}
+        _attach_salvage(result, salvage)
         _attach_keep_manager_retire(service, client, root_id, result)
         return result
-    return {"action": "blocked", "workflow_id": workflow.id, "reason": reason}
+    result = {"action": "blocked", "workflow_id": workflow.id, "reason": reason}
+    _attach_salvage(result, salvage)
+    return result
 
 
 def _refresh_activation(store, workflow_id: str | None) -> None:
@@ -893,26 +907,28 @@ def _consume_declared_blocker(service: WorkflowService, client, readiness) -> di
     workflow = service.store.get(readiness.workflow_id)
     detail = f"{workflow.role.value} blocked: {readiness.blocked_reason}"
     if workflow.status == WorkflowStatus.RUNNING:
+        # Cancel first so run finalization is legal, but keep the worktree until salvage.
         service.finish(
             workflow.id,
             WorkflowStatus.CANCELLED,
             lambda reference: client.set_lifecycle(reference, WorkflowStatus.CANCELLED, detail),
             error=detail,
             close_external=client.close_terminals,
+            close_resources=False,
         )
         workflow = service.store.get(workflow.id)
     if workflow.status != WorkflowStatus.CANCELLED:
         raise ValueError("declared blocker role could not reach cancelled state")
     blocked = service.store.finalize_blocked_readiness(readiness.id)
+    salvage = service.salvage_progress(blocked.root_manager_id, client)
+    service.close_cancelled_resources(workflow.id, client.close_terminals)
     result = {
         "action": "blocked",
         "workflow_id": workflow.id,
         "blocker": asdict(readiness),
         "run": asdict(blocked),
     }
-    progress = service.try_progress_push(blocked.root_manager_id, client)
-    if progress is not None:
-        result["progress_push"] = {"pushed": progress["pushed"]}
+    _attach_salvage(result, salvage)
     _attach_keep_manager_retire(service, client, blocked.root_manager_id, result)
     return result
 
@@ -1041,10 +1057,9 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
         )
         service.release_coordinator(manager.id, "orchestration_failed")
         failed = service.store.orchestration_run(manager.id)
-        progress = service.try_progress_push(manager.id, client)
+        salvage = service.salvage_progress(manager.id, client)
         result = {"action": "failed", "run": asdict(failed)}
-        if progress is not None:
-            result["progress_push"] = {"pushed": progress["pushed"]}
+        _attach_salvage(result, salvage)
         _attach_keep_manager_retire(service, client, manager.id, result)
         return result
     if any(item.status == WorkflowStatus.RUNNING for item in reviewers):
@@ -1095,10 +1110,9 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
             coordinator_reason="orchestration_blocked",
             extra_readiness_ids=extra_ids,
         )
-        progress = service.try_progress_push(manager.id, client)
+        salvage = service.salvage_progress(manager.id, client)
         result = {"action": "blocked", "run": asdict(blocked)}
-        if progress is not None:
-            result["progress_push"] = {"pushed": progress["pushed"]}
+        _attach_salvage(result, salvage)
         _attach_keep_manager_retire(service, client, manager.id, result)
         return result
     for reviewer in reviewers:
@@ -1502,6 +1516,7 @@ def handle(args: argparse.Namespace) -> int:
                             "at": workflow.observer_stopped_at,
                         },
                     },
+                    "salvage_push": None if root_id is None else store.latest_salvage_push(root_id),
                     "freshness": freshness,
                 },
                 indent=2,

@@ -2596,3 +2596,63 @@ class WorkflowStore:
                 """
             ).fetchall()
         return [self._record(row) for row in rows]
+
+    def record_salvage_push(
+        self,
+        workflow_id: str,
+        *,
+        sha: str | None,
+        pushed: bool,
+        skip_reason: str | None,
+        error: str | None,
+    ) -> dict[str, object]:
+        """Persist one salvage attempt for the root workflow. Does not create a commit."""
+        if self.get(workflow_id).parent_id is not None:
+            raise ValueError("salvage push is recorded on the root workflow")
+        created_at = _now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO workflow_salvage_pushes(
+                    workflow_id, sha, pushed, skip_reason, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workflow_id,
+                    sha,
+                    1 if pushed else 0,
+                    skip_reason,
+                    error,
+                    created_at,
+                ),
+            )
+            row_id = int(cursor.lastrowid)
+        recorded = self.latest_salvage_push(workflow_id)
+        if recorded is None or recorded["id"] != row_id:
+            raise ValueError("salvage push was not recorded")
+        return recorded
+
+    def latest_salvage_push(self, workflow_id: str) -> dict[str, object] | None:
+        """Return the newest salvage attempt for a root workflow."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, sha, pushed, skip_reason, error, created_at
+                FROM workflow_salvage_pushes
+                WHERE workflow_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "workflow_id": str(row["workflow_id"]),
+            "sha": row["sha"],
+            "pushed": bool(row["pushed"]),
+            "skip_reason": row["skip_reason"],
+            "error": row["error"],
+            "created_at": str(row["created_at"]),
+        }

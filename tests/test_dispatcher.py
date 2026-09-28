@@ -10,6 +10,7 @@ from conftest import write_config
 from flybridge_cli.dispatcher import QueueDispatcher
 from flybridge_cli.main import main
 from flybridge_core import BatchStore, ResourceQueue, WorkflowStore, load_config
+from flybridge_core.workflows import SCHEMA_VERSION
 
 
 class FakeOrca:
@@ -299,4 +300,4 @@ def test_version_three_queue_state_migrates_in_place(tmp_path: Path) -> None:
     assert migrated.inspect(lease.request_id)["status"] == "leased"
     assert migrated.blocks() == []
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

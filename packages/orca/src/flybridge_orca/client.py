@@ -783,6 +783,33 @@ class OrcaClient:
             raise OrcaError(result.stderr.strip() or "parent worktree change inspection failed")
         return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
 
+    def salvage_candidate(self, worktree_path: str, start_sha: str | None) -> dict[str, str | None]:
+        """Classify a clean descendant of start_sha that a fast-forward push may publish."""
+        if not start_sha:
+            return {"sha": None, "skip_reason": "no_start_sha"}
+        status_result = self._git(worktree_path, "status", "--porcelain")
+        if status_result.returncode:
+            raise OrcaError(status_result.stderr.strip() or "unable to inspect worktree status")
+        if status_result.stdout.strip():
+            return {"sha": None, "skip_reason": "dirty"}
+        head = self._git(worktree_path, "rev-parse", "--verify", "HEAD")
+        if head.returncode or not head.stdout.strip():
+            return {"sha": None, "skip_reason": "no_head"}
+        sha = head.stdout.strip()
+        if sha == start_sha:
+            return {"sha": sha, "skip_reason": "no_implementation_commits"}
+        ancestor = self._git(worktree_path, "merge-base", "--is-ancestor", start_sha, "HEAD")
+        if ancestor.returncode:
+            return {"sha": sha, "skip_reason": "rewritten_history"}
+        upstream = self._git(worktree_path, "rev-parse", "--verify", "--quiet", "@{upstream}")
+        if upstream.returncode == 0 and upstream.stdout.strip():
+            published = self._git(
+                worktree_path, "merge-base", "--is-ancestor", "HEAD", "@{upstream}"
+            )
+            if published.returncode == 0:
+                return {"sha": sha, "skip_reason": "already_published"}
+        return {"sha": sha, "skip_reason": None}
+
     def _git(self, worktree_path: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         try:
             return self._run(["git", "-C", worktree_path, *arguments], timeout=60)
