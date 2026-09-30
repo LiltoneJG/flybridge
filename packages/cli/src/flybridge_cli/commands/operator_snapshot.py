@@ -52,7 +52,7 @@ def _collect(
             key = futures[future]
             try:
                 completed[key] = future.result(), None
-            except Exception as exc:  # each remote failure stays local to its reference
+            except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
                 completed[key] = None, str(exc)
     for key in ordered:
         value, error = completed[key]
@@ -124,7 +124,8 @@ def enrich_snapshot(
         for issue in issues.values():
             if issue["url"] in issue_urls:
                 pr_urls.update(
-                    link["url"] for link in issue.get("linked_pull_requests") or []
+                    link["url"]
+                    for link in issue.get("linked_pull_requests") or []
                     if isinstance(link.get("url"), str)
                 )
         row["related_issue_urls"] = sorted(issue_urls)
@@ -138,10 +139,12 @@ def enrich_snapshot(
     # Retain all related facts for provenance. `matches_assignee` identifies the focus set.
     focused_issues = sorted(item["url"] for item in issues.values() if item["matches_assignee"])
     focused_prs = sorted(item["url"] for item in prs.values() if item["matches_assignee"])
-    focused_urls = set((*focused_issues, *focused_prs))
+    focused_urls = {*focused_issues, *focused_prs}
     focused_worktrees = [
-        row["orca"]["path"] for row in rows
-        if assignee is None or focused_urls.intersection(
+        row["orca"]["path"]
+        for row in rows
+        if assignee is None
+        or focused_urls.intersection(
             (*row["related_issue_urls"], *row["related_pull_request_urls"])
         )
     ]
@@ -154,8 +157,12 @@ def enrich_snapshot(
         "worktrees": rows,
         "issues": [issues[key] for key in sorted(issues)],
         "pull_requests": [prs[key] for key in sorted(prs)],
-        "warnings": [*(inventory.get("warnings") or []), *pr_warnings, *issue_warnings,
-                     *extra_warnings],
+        "warnings": [
+            *(inventory.get("warnings") or []),
+            *pr_warnings,
+            *issue_warnings,
+            *extra_warnings,
+        ],
         "failures": inventory.get("failures") or [],
         "provenance": {
             "worktrees": "Orca worktree ps and local git",

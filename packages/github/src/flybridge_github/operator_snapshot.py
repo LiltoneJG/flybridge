@@ -8,7 +8,6 @@ from typing import Any
 
 from .cli import GitHubCli, GitHubCliError
 
-
 _PR_QUERY = """
 query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
@@ -121,8 +120,17 @@ class GitHubOperatorFacts:
         try:
             result = self.cli.run(
                 [
-                    self.cli.executable, "api", "graphql", "-f", f"query={query}",
-                    "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"number={number}",
+                    self.cli.executable,
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={query}",
+                    "-F",
+                    f"owner={owner}",
+                    "-F",
+                    f"name={name}",
+                    "-F",
+                    f"number={number}",
                 ],
                 timeout=60,
             )
@@ -133,7 +141,9 @@ class GitHubOperatorFacts:
         try:
             payload = json.loads(result.stdout)
             if payload.get("errors"):
-                raise OperatorSnapshotError(str(payload["errors"][0].get("message", "GraphQL error")))
+                raise OperatorSnapshotError(
+                    str(payload["errors"][0].get("message", "GraphQL error"))
+                )
             node = payload["data"]["repository"][kind]
         except (KeyError, TypeError, ValueError, IndexError) as exc:
             raise OperatorSnapshotError("invalid GitHub GraphQL response") from exc
@@ -141,13 +151,19 @@ class GitHubOperatorFacts:
             raise OperatorSnapshotError(f"GitHub {kind} was not found: {repository}#{number}")
         return node
 
-    def _projects(self, repository: str, number: int, kind: str, warnings: list[str], source: str) -> list[dict]:
+    def _projects(
+        self, repository: str, number: int, kind: str, warnings: list[str], source: str
+    ) -> list[dict]:
         with self._project_lock:
             if self._project_access_error is not None:
-                warnings.append(f"{source}: Project facts unavailable: {self._project_access_error}")
+                warnings.append(
+                    f"{source}: Project facts unavailable: {self._project_access_error}"
+                )
                 return []
             try:
-                node = self._query(repository, number, _PROJECT_QUERY.replace("RESOURCE", kind), kind)
+                node = self._query(
+                    repository, number, _PROJECT_QUERY.replace("RESOURCE", kind), kind
+                )
             except OperatorSnapshotError as exc:
                 reason = str(exc).splitlines()[0]
                 if "required scopes" in reason:
@@ -155,7 +171,8 @@ class GitHubOperatorFacts:
                 warnings.append(f"{source}: Project facts unavailable: {reason}")
                 return []
         return [
-            item["project"] for item in _nodes(node.get("projectItems"), "projects", warnings, source)
+            item["project"]
+            for item in _nodes(node.get("projectItems"), "projects", warnings, source)
             if isinstance(item.get("project"), dict)
         ]
 
@@ -163,32 +180,51 @@ class GitHubOperatorFacts:
         node = self._query(repository, number, _PR_QUERY, "pullRequest")
         source = f"https://github.com/{repository}/pull/{number}"
         warnings: list[str] = []
-        assignees = [_login(item) for item in _nodes(node.get("assignees"), "assignees", warnings, source)]
+        assignees = [
+            _login(item) for item in _nodes(node.get("assignees"), "assignees", warnings, source)
+        ]
         reviews = [
-            {"url": item.get("url"), "state": item.get("state"), "body": item.get("body"),
-             "author": _login(item.get("author")), "submitted_at": item.get("submittedAt")}
+            {
+                "url": item.get("url"),
+                "state": item.get("state"),
+                "body": item.get("body"),
+                "author": _login(item.get("author")),
+                "submitted_at": item.get("submittedAt"),
+            }
             for item in _nodes(node.get("reviews"), "reviews", warnings, source)
         ]
         comments = [
-            {"url": item.get("url"), "body": item.get("body"), "author": _login(item.get("author")),
-             "created_at": item.get("createdAt")}
+            {
+                "url": item.get("url"),
+                "body": item.get("body"),
+                "author": _login(item.get("author")),
+                "created_at": item.get("createdAt"),
+            }
             for item in _nodes(node.get("comments"), "comments", warnings, source)
         ]
         threads = []
         for item in _nodes(node.get("reviewThreads"), "review threads", warnings, source):
             if item.get("isResolved") is True:
                 continue
-            threads.append({
-                "is_outdated": item.get("isOutdated"),
-                "comments": [
-                    {"url": comment.get("url"), "body": comment.get("body"),
-                     "author": _login(comment.get("author"))}
-                    for comment in _nodes(item.get("comments"), "thread comments", warnings, source)
-                ],
-            })
+            threads.append(
+                {
+                    "is_outdated": item.get("isOutdated"),
+                    "comments": [
+                        {
+                            "url": comment.get("url"),
+                            "body": comment.get("body"),
+                            "author": _login(comment.get("author")),
+                        }
+                        for comment in _nodes(
+                            item.get("comments"), "thread comments", warnings, source
+                        )
+                    ],
+                }
+            )
         rollup = node.get("statusCheckRollup")
-        checks = _nodes(rollup.get("contexts") if isinstance(rollup, dict) else None,
-                        "checks", warnings, source)
+        checks = _nodes(
+            rollup.get("contexts") if isinstance(rollup, dict) else None, "checks", warnings, source
+        )
         normalized_checks = []
         failed_checks = []
         for check in checks:
@@ -202,7 +238,10 @@ class GitHubOperatorFacts:
             }
             normalized_checks.append(normalized)
             if str(normalized["conclusion"] or normalized["status"]).upper() in {
-                "FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"
+                "FAILURE",
+                "ERROR",
+                "TIMED_OUT",
+                "ACTION_REQUIRED",
             }:
                 failed_checks.append(normalized)
                 if not normalized["summary"] or not normalized["url"]:
@@ -211,22 +250,37 @@ class GitHubOperatorFacts:
                     )
         projects = self._projects(repository, number, "pullRequest", warnings, source)
         return {
-            "repository": repository, "number": number, "url": node.get("url") or source,
-            "body": node.get("body"), "state": node.get("state"), "is_draft": node.get("isDraft"),
-            "assignees": [login for login in assignees if login], "projects": projects,
-            "reviews": reviews, "comments": comments, "unresolved_threads": threads,
-            "checks": normalized_checks, "failed_checks": failed_checks,
-            "warnings": warnings, "provenance": {"source": source, "api": "GitHub GraphQL"},
+            "repository": repository,
+            "number": number,
+            "url": node.get("url") or source,
+            "body": node.get("body"),
+            "state": node.get("state"),
+            "is_draft": node.get("isDraft"),
+            "assignees": [login for login in assignees if login],
+            "projects": projects,
+            "reviews": reviews,
+            "comments": comments,
+            "unresolved_threads": threads,
+            "checks": normalized_checks,
+            "failed_checks": failed_checks,
+            "warnings": warnings,
+            "provenance": {"source": source, "api": "GitHub GraphQL"},
         }
 
     def issue(self, repository: str, number: int) -> dict:
         node = self._query(repository, number, _ISSUE_QUERY, "issue")
         source = f"https://github.com/{repository}/issues/{number}"
         warnings: list[str] = []
-        assignees = [_login(item) for item in _nodes(node.get("assignees"), "assignees", warnings, source)]
+        assignees = [
+            _login(item) for item in _nodes(node.get("assignees"), "assignees", warnings, source)
+        ]
         comments = [
-            {"url": item.get("url"), "body": item.get("body"), "author": _login(item.get("author")),
-             "created_at": item.get("createdAt")}
+            {
+                "url": item.get("url"),
+                "body": item.get("body"),
+                "author": _login(item.get("author")),
+                "created_at": item.get("createdAt"),
+            }
             for item in _nodes(node.get("comments"), "comments", warnings, source)
         ]
         projects = self._projects(repository, number, "issue", warnings, source)
@@ -236,12 +290,24 @@ class GitHubOperatorFacts:
             if isinstance(pr, dict) and pr.get("__typename") == "PullRequest":
                 repo = pr.get("repository") or {}
                 if isinstance(repo, dict) and isinstance(repo.get("nameWithOwner"), str):
-                    linked.append({"repository": repo["nameWithOwner"], "number": pr.get("number"),
-                                   "url": pr.get("url")})
+                    linked.append(
+                        {
+                            "repository": repo["nameWithOwner"],
+                            "number": pr.get("number"),
+                            "url": pr.get("url"),
+                        }
+                    )
         return {
-            "repository": repository, "number": number, "url": node.get("url") or source,
-            "title": node.get("title"), "body": node.get("body"), "state": node.get("state"),
-            "assignees": [login for login in assignees if login], "comments": comments,
-            "projects": projects, "linked_pull_requests": linked, "warnings": warnings,
+            "repository": repository,
+            "number": number,
+            "url": node.get("url") or source,
+            "title": node.get("title"),
+            "body": node.get("body"),
+            "state": node.get("state"),
+            "assignees": [login for login in assignees if login],
+            "comments": comments,
+            "projects": projects,
+            "linked_pull_requests": linked,
+            "warnings": warnings,
             "provenance": {"source": source, "api": "GitHub GraphQL"},
         }

@@ -17,22 +17,38 @@ from flybridge_orca import ListedWorktree
 
 def _inventory() -> dict:
     return {
-        "generated_at": "2026-09-30T00:00:00Z", "warnings": [], "failures": [],
+        "generated_at": "2026-09-30T00:00:00Z",
+        "warnings": [],
+        "failures": [],
         "worktrees": [
-            {"orca": {"path": "/a", "comment": "https://github.com/o/parent/issues/3",
-                      "github_hint": {"issues": [{"url": "https://github.com/o/parent/issues/3"}]}},
-             "git": {"submodules": [{"github_repository": "o/child", "branch": "feature"}]},
-             "pull_requests": [
-                 {"repository": "o/parent", "number": 2, "matched_from": "parent"},
-                 {"repository": "o/child", "number": 4, "matched_from": "submodule"},
-             ]},
-            {"orca": {"path": "/b", "comment": "", "github_hint": {
-                "issues": [{"url": "https://github.com/o/parent/issues/3"}]}},
-             "git": {}, "pull_requests": [
-                 {"repository": "o/child", "number": 4, "matched_from": "parent"},
-             ]},
-            {"orca": {"path": "/unassigned", "comment": "", "github_hint": {"issues": []}},
-             "git": {}, "pull_requests": []},
+            {
+                "orca": {
+                    "path": "/a",
+                    "comment": "https://github.com/o/parent/issues/3",
+                    "github_hint": {"issues": [{"url": "https://github.com/o/parent/issues/3"}]},
+                },
+                "git": {"submodules": [{"github_repository": "o/child", "branch": "feature"}]},
+                "pull_requests": [
+                    {"repository": "o/parent", "number": 2, "matched_from": "parent"},
+                    {"repository": "o/child", "number": 4, "matched_from": "submodule"},
+                ],
+            },
+            {
+                "orca": {
+                    "path": "/b",
+                    "comment": "",
+                    "github_hint": {"issues": [{"url": "https://github.com/o/parent/issues/3"}]},
+                },
+                "git": {},
+                "pull_requests": [
+                    {"repository": "o/child", "number": 4, "matched_from": "parent"},
+                ],
+            },
+            {
+                "orca": {"path": "/unassigned", "comment": "", "github_hint": {"issues": []}},
+                "git": {},
+                "pull_requests": [],
+            },
         ],
     }
 
@@ -48,28 +64,32 @@ class FakeFacts:
         if number == 5:
             raise RuntimeError("partial API outage")
         return {
-            "repository": repository, "number": number,
+            "repository": repository,
+            "number": number,
             "url": f"https://github.com/{repository}/pull/{number}",
             "body": "Related: #3; PR #169→#170" if number == 2 else "",
             "comments": [{"body": "PR #171; https://github.com/o/parent/issues/3"}],
             "assignees": ["alice"] if number == 4 else ["bob"],
             "unresolved_threads": [{"comments": [{"url": "https://github.com/thread"}]}]
-            if number == 4 else [],
-            "checks": [{"status": "IN_PROGRESS"}] if number == 2 else [
-                {"status": "COMPLETED", "conclusion": "FAILURE"}
-            ],
-            "failed_checks": [] if number == 2 else [
-                {"summary": "failed", "url": "https://github.com/check"}
-            ],
+            if number == 4
+            else [],
+            "checks": [{"status": "IN_PROGRESS"}]
+            if number == 2
+            else [{"status": "COMPLETED", "conclusion": "FAILURE"}],
+            "failed_checks": []
+            if number == 2
+            else [{"summary": "failed", "url": "https://github.com/check"}],
             "warnings": [],
         }
 
     def issue(self, repository: str, number: int) -> dict:
         self.calls[("issue", repository, number)] += 1
         return {
-            "repository": repository, "number": number,
+            "repository": repository,
+            "number": number,
             "url": f"https://github.com/{repository}/issues/{number}",
-            "body": "details", "comments": [{"body": "comment", "url": "https://github.com/comment"}],
+            "body": "details",
+            "comments": [{"body": "comment", "url": "https://github.com/comment"}],
             "assignees": ["alice"],
             "linked_pull_requests": [{"repository": "o/parent", "number": 5}],
             "warnings": [],
@@ -79,12 +99,17 @@ class FakeFacts:
 def test_snapshot_deduplicates_submodule_pr_and_issue_and_stabilizes_order() -> None:
     facts = FakeFacts()
     snapshot = enrich_snapshot(_inventory(), facts, assignee="alice")
-    assert facts.calls == Counter({
-        ("pr", "o/parent", 2): 1, ("pr", "o/child", 4): 1,
-        ("pr", "o/parent", 5): 1, ("issue", "o/parent", 3): 1,
-    })
+    assert facts.calls == Counter(
+        {
+            ("pr", "o/parent", 2): 1,
+            ("pr", "o/child", 4): 1,
+            ("pr", "o/parent", 5): 1,
+            ("issue", "o/parent", 3): 1,
+        }
+    )
     assert [item["url"] for item in snapshot["pull_requests"]] == [
-        "https://github.com/o/child/pull/4", "https://github.com/o/parent/pull/2"
+        "https://github.com/o/child/pull/4",
+        "https://github.com/o/parent/pull/2",
     ]
     assert snapshot["worktrees"][0]["pull_requests"][1]["matched_from"] == "submodule"
     assert snapshot["issues"][0]["matches_assignee"] is True
@@ -102,8 +127,11 @@ def test_snapshot_deduplicates_submodule_pr_and_issue_and_stabilizes_order() -> 
     assert snapshot["focused_worktrees"] == ["/a", "/b"]
     assert snapshot["focused_refs"]["issues"] == ["https://github.com/o/parent/issues/3"]
     assert snapshot["focused_refs"]["pull_requests"] == ["https://github.com/o/child/pull/4"]
-    assert all("/issues/17" not in url for row in snapshot["worktrees"]
-               for url in row["related_issue_urls"])
+    assert all(
+        "/issues/17" not in url
+        for row in snapshot["worktrees"]
+        for url in row["related_issue_urls"]
+    )
 
 
 class FakeCli:
@@ -120,25 +148,61 @@ class FakeCli:
             return SimpleNamespace(returncode=1, stderr="read:project denied", stdout="")
         if "pullRequest(number" in query:
             node = {
-                "url": "https://github.com/o/r/pull/2", "body": "body", "state": "OPEN",
-                "isDraft": False, "assignees": _connection([{"login": "alice"}]),
-                "reviews": _connection([{"url": "https://github.com/review", "state": "APPROVED",
-                                          "body": "ok", "author": {"login": "human"}}]),
+                "url": "https://github.com/o/r/pull/2",
+                "body": "body",
+                "state": "OPEN",
+                "isDraft": False,
+                "assignees": _connection([{"login": "alice"}]),
+                "reviews": _connection(
+                    [
+                        {
+                            "url": "https://github.com/review",
+                            "state": "APPROVED",
+                            "body": "ok",
+                            "author": {"login": "human"},
+                        }
+                    ]
+                ),
                 "comments": _connection([]),
-                "reviewThreads": _connection([{"isResolved": False, "isOutdated": False,
-                                                "comments": _connection([{"url": "https://github.com/thread",
-                                                                          "body": "fix"}])}]),
-                "statusCheckRollup": {"contexts": _connection([
-                    {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED",
-                     "conclusion": "FAILURE", "detailsUrl": "https://github.com/job",
-                     "summary": "test failed"},
-                    {"__typename": "CheckRun", "name": "next", "status": "IN_PROGRESS",
-                     "conclusion": None, "detailsUrl": "https://github.com/next", "summary": None},
-                ])},
+                "reviewThreads": _connection(
+                    [
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": _connection(
+                                [{"url": "https://github.com/thread", "body": "fix"}]
+                            ),
+                        }
+                    ]
+                ),
+                "statusCheckRollup": {
+                    "contexts": _connection(
+                        [
+                            {
+                                "__typename": "CheckRun",
+                                "name": "ci",
+                                "status": "COMPLETED",
+                                "conclusion": "FAILURE",
+                                "detailsUrl": "https://github.com/job",
+                                "summary": "test failed",
+                            },
+                            {
+                                "__typename": "CheckRun",
+                                "name": "next",
+                                "status": "IN_PROGRESS",
+                                "conclusion": None,
+                                "detailsUrl": "https://github.com/next",
+                                "summary": None,
+                            },
+                        ]
+                    )
+                },
             }
-            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
-                "data": {"repository": {"pullRequest": node}}
-            }))
+            return SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps({"data": {"repository": {"pullRequest": node}}}),
+            )
         raise AssertionError("unexpected query")
 
 
@@ -148,10 +212,15 @@ def _connection(nodes: list[dict]) -> dict:
 
 def test_pr_detail_keeps_failed_check_summary_thread_and_project_warning() -> None:
     detail = GitHubOperatorFacts(user="alice", cli=FakeCli()).pull_request("o/r", 2)
-    assert detail["failed_checks"] == [{
-        "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE",
-        "url": "https://github.com/job", "summary": "test failed",
-    }]
+    assert detail["failed_checks"] == [
+        {
+            "name": "ci",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "url": "https://github.com/job",
+            "summary": "test failed",
+        }
+    ]
     assert detail["checks"][1]["status"] == "IN_PROGRESS"
     assert detail["unresolved_threads"][0]["comments"][0]["url"] == "https://github.com/thread"
     assert detail["reviews"][0]["author"] == "human"
@@ -163,20 +232,44 @@ def test_project_scope_failure_is_cached_without_losing_issue_facts() -> None:
         project_calls = 0
 
         def run(self, arguments: list[str], *, timeout: int) -> SimpleNamespace:
-            query = next(item.removeprefix("query=") for item in arguments if item.startswith("query="))
+            query = next(
+                item.removeprefix("query=") for item in arguments if item.startswith("query=")
+            )
             if "projectItems" in query:
                 self.project_calls += 1
-                return SimpleNamespace(returncode=1, stderr="required scopes: read:project", stdout="")
+                return SimpleNamespace(
+                    returncode=1, stderr="required scopes: read:project", stdout=""
+                )
             if "issue(number" in query:
-                return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
-                    "data": {"repository": {"issue": {
-                        "url": "https://github.com/o/r/issues/3", "title": "issue", "body": "body",
-                        "state": "OPEN", "assignees": _connection([{"login": "alice"}]),
-                        "comments": _connection([{"url": "https://github.com/comment",
-                                                   "body": "evidence", "author": {"login": "human"}}]),
-                        "timelineItems": _connection([]),
-                    }}}
-                }))
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="",
+                    stdout=json.dumps(
+                        {
+                            "data": {
+                                "repository": {
+                                    "issue": {
+                                        "url": "https://github.com/o/r/issues/3",
+                                        "title": "issue",
+                                        "body": "body",
+                                        "state": "OPEN",
+                                        "assignees": _connection([{"login": "alice"}]),
+                                        "comments": _connection(
+                                            [
+                                                {
+                                                    "url": "https://github.com/comment",
+                                                    "body": "evidence",
+                                                    "author": {"login": "human"},
+                                                }
+                                            ]
+                                        ),
+                                        "timelineItems": _connection([]),
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                )
             return super().run(arguments, timeout=timeout)
 
     cli = Cli()
@@ -192,10 +285,18 @@ def test_project_scope_failure_is_cached_without_losing_issue_facts() -> None:
 
 
 def test_operator_snapshot_flags_follow_cli_conventions() -> None:
-    args = build_parser().parse_args([
-        "operator", "snapshot", "--assignee", "alice", "--path-prefix", "/a",
-        "--exclude-name", "old",
-    ])
+    args = build_parser().parse_args(
+        [
+            "operator",
+            "snapshot",
+            "--assignee",
+            "alice",
+            "--path-prefix",
+            "/a",
+            "--exclude-name",
+            "old",
+        ]
+    )
     assert args.assignee == "alice"
     assert args.path_prefixes == ["/a"]
     assert args.exclude_names == ["old"]
@@ -222,7 +323,9 @@ def test_detail_collection_is_bounded_and_sorted_after_parallel_completion() -> 
     assert warnings == []
 
 
-def test_path_selection_precedes_github_queries_with_and_without_filter(tmp_path, monkeypatch) -> None:
+def test_path_selection_precedes_github_queries_with_and_without_filter(
+    tmp_path, monkeypatch
+) -> None:
     paths = [tmp_path / "selected", tmp_path / "excluded"]
     for path in paths:
         path.mkdir()
@@ -230,9 +333,11 @@ def test_path_selection_precedes_github_queries_with_and_without_filter(tmp_path
         ListedWorktree(str(index), str(path), path.name, "ready", "", "feature", None, None)
         for index, path in enumerate(paths)
     )
-    monkeypatch.setattr(inventory_command, "_adapter", lambda _config: SimpleNamespace(
-        list_worktrees=lambda: (listed, False)
-    ))
+    monkeypatch.setattr(
+        inventory_command,
+        "_adapter",
+        lambda _config: SimpleNamespace(list_worktrees=lambda: (listed, False)),
+    )
 
     class Probe:
         def inspect(self, path: str) -> GitWorktreeState:
@@ -251,16 +356,24 @@ def test_path_selection_precedes_github_queries_with_and_without_filter(tmp_path
             return {}, ()
 
     monkeypatch.setattr(inventory_command, "GitHubPullRequests", Pulls)
-    monkeypatch.setattr(inventory_command, "supplement_pull_requests",
-                        lambda _client, _selected, _states, _open, **_kwargs: ({}, ()))
+    monkeypatch.setattr(
+        inventory_command,
+        "supplement_pull_requests",
+        lambda _client, _selected, _states, _open, **_kwargs: ({}, ()),
+    )
     config = SimpleNamespace(
         reconcile=SimpleNamespace(exclude_worktrees=()),
         github=SimpleNamespace(enabled=True, login="alice", skip_repositories=()),
     )
 
     def run(prefixes: list[str]) -> dict:
-        args = SimpleNamespace(path_prefixes=prefixes, exclude_prefixes=[], exclude_names=[],
-                               no_github=False, with_review_facts=False)
+        args = SimpleNamespace(
+            path_prefixes=prefixes,
+            exclude_prefixes=[],
+            exclude_names=[],
+            no_github=False,
+            with_review_facts=False,
+        )
         snapshot, failed = inventory_command.build_inventory(args, config)
         assert failed is False
         return snapshot
