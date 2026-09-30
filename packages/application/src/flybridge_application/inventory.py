@@ -455,6 +455,8 @@ def supplement_pull_requests(
     extras: list[PullRequestFact] = []
     failures: list[PullRequestQueryFailure] = []
     skipped = {name.lower() for name in skipped_repositories if name}
+    queried_heads: set[tuple[str, str]] = set()
+    queried_numbers: set[tuple[str, int]] = set()
     for worktree in worktrees:
         cached = git_states.get(worktree.identity)
         if not isinstance(cached, GitWorktreeState):
@@ -462,6 +464,10 @@ def supplement_pull_requests(
         for repository, branch in checkout_heads(cached):
             if repository.lower() in skipped:
                 continue
+            head_key = (repository, normalize_ref_name(branch))
+            if head_key in queried_heads:
+                continue
+            queried_heads.add(head_key)
             if _head_has_fact(open_facts, repository, branch):
                 continue
             facts, failure = client.list_by_head(repository, branch)
@@ -472,6 +478,10 @@ def supplement_pull_requests(
         repository = cached.github_repository
         if hinted is None or repository is None or repository.lower() in skipped:
             continue
+        number_key = (repository, hinted)
+        if number_key in queried_numbers:
+            continue
+        queried_numbers.add(number_key)
         if _number_has_fact(open_facts, extras, repository, hinted):
             continue
         fact, failure = client.get(repository, hinted)

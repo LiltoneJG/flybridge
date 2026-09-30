@@ -217,13 +217,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prs_refresh.add_argument("repository", help="GitHub repository in owner/name form")
     prs_refresh.add_argument("number", type=int, help="pull request number")
-    operator = sub.add_parser("operator", help="show private guidance for the workflow operator")
+    operator = sub.add_parser("operator", help="operator guidance and read-only evidence")
     operator_sub = operator.add_subparsers(
         dest="operator_command", required=True, parser_class=ArgumentParser
     )
     operator_sub.add_parser(
         "guide", help="print the configured operator skill document index as JSON"
     )
+    snapshot = operator_sub.add_parser(
+        "snapshot", help="read-only worktree, issue, PR, review, and CI evidence as JSON"
+    )
+    snapshot.add_argument("--assignee", help="focus login; default: github.login")
+    snapshot.add_argument("--all-assignees", action="store_true", help="do not focus one login")
+    snapshot.add_argument("--path-prefix", action="append", default=[], dest="path_prefixes")
+    snapshot.add_argument("--exclude-prefix", action="append", default=[], dest="exclude_prefixes")
+    snapshot.add_argument("--exclude-name", action="append", default=[], dest="exclude_names")
     workflow_list = workflow_sub.add_parser("list", help="list Flybridge workflows")
     workflow_list.add_argument(
         "--status",

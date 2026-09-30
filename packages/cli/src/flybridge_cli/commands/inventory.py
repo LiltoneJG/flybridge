@@ -59,8 +59,7 @@ def select_listed_worktrees(
     return collapse_inventory_worktrees(selected)
 
 
-def handle_inventory(args: argparse.Namespace) -> int:
-    config = _config(args)
+def build_inventory(args: argparse.Namespace, config) -> tuple[dict, bool]:
     client = _adapter(config)
     listed, truncated = client.list_worktrees()
     selected = select_listed_worktrees(listed, args, config.reconcile.exclude_worktrees)
@@ -71,7 +70,7 @@ def handle_inventory(args: argparse.Namespace) -> int:
             git_states[worktree.identity] = probe.inspect(worktree.path)
         except GitProbeError as exc:
             git_states[worktree.identity] = exc
-    include_github = config.github.enabled and not args.no_github
+    include_github = config.github.enabled and not getattr(args, "no_github", False)
     pull_requests_by_repository = None
     pull_request_errors: tuple[str, ...] = ()
     pull_request_warnings: tuple[str, ...] = ()
@@ -134,7 +133,10 @@ def handle_inventory(args: argparse.Namespace) -> int:
     )
     if github is not None and getattr(args, "with_review_facts", False):
         snapshot = attach_matched_review_facts(snapshot, github)
+    return snapshot, bool(include_github and (snapshot.get("failures") or pull_request_errors))
+
+
+def handle_inventory(args: argparse.Namespace) -> int:
+    snapshot, failed = build_inventory(args, _config(args))
     print(json.dumps(snapshot, indent=2))
-    if include_github and (snapshot.get("failures") or pull_request_errors):
-        return 2
-    return 0
+    return 2 if failed else 0

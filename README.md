@@ -86,6 +86,8 @@ sequenceDiagram
 
 Use `queue status` for counts, `queue status --details` to identify requests, delivery state, recovery blocks, and dispatcher health, and `queue watch` for live events. Old leases are flagged for attention without being released. Cancelling an unverified lease blocks its resource; confirm external cleanup and run `queue resolve --request ID --cleanup-confirmed` to admit the next waiter. See the [resource queue contract](docs/en/specification.md#resource-queue-contract) for the lifecycle and recovery rules.
 
+`flybridge operator snapshot` emits a read-only JSON view of Orca worktrees, local git, related GitHub issues and pull requests, review threads, checks, and failed-check summaries with source URLs. It accepts `--assignee` (default `github.login`), `--all-assignees`, and the same path selection flags as `inventory`. All related facts remain in the output; `focused_refs` and `focused_worktrees` lead to the assignee's items, while `matches_assignee` marks each issue and pull request. `--all-assignees` focuses every item and worktree. Missing access, failed queries, and truncated connections are reported as warnings with exit status 2. The command makes no merge decision.
+
 ## Optional GitHub Project workflow
 
 With `github.enabled` and boards configured, `board screen` lists candidate issues. Add `--with-refs` to see related local worktrees and development references; `prs screen` lists authored pull requests. These commands are read-only. You select the issue and then start or resume its workflow. Directory names are not used as issue identifiers.
