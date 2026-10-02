@@ -51,9 +51,10 @@ For parent-managed batches, pass `--notify-terminal <Orca-handle>` to `workflow 
 
 ## Operator guidance
 
-| Command                    | Purpose                                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `flybridge operator guide` | Validate and print the configured private Operator skill index without exposing document content |
+| Command                       | Purpose                                                                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `flybridge operator guide`    | Validate and print the configured private Operator skill index without exposing document content                                                                   |
+| `flybridge operator snapshot` | Read-only JSON investigation of selected worktrees with related issue, PR, Project, review, thread, and CI evidence; warnings and provenance mark incomplete facts |
 
 The Operator is the workflow caller, not a workflow role. Read the indexed routing skill first and then the skills applicable to the requested operational task. Decide workflow-wide constraints once and pass roles the decision and its validity. Pass direct issue, pull-request, or review-comment URLs for facts that the responsible role must inspect. Do not complete or proceed while required verification evidence is missing, including requested proof and kicking hosted CI when a source asks for those, not code inspection alone. Hosted CI is complete once triggered; do not wait for its result. Obtain missing prerequisites or keep the role blocked.
 
@@ -78,6 +79,8 @@ Artifacts are content-addressed as `state_dir/artifacts/workflows/<manager-id>/<
 ## Worktree inventory contract
 
 Agents that need the merge-readiness *facts* for Orca workspaces must run `flybridge inventory` with the same `--config` used for other Flybridge commands. For review, comment, and thread bodies, pass `--with-review-facts`. The JSON document is the source of truth for collection. Do not write one-shot Python collectors or raw `gh api graphql` queries unless `flybridge inventory` itself failed. A non-zero exit after JSON output is a collection failure, not a mergeability verdict. The command reports facts only: it may include GitHub Actor `is_bot` on review authors, but it does not apply operator policy, interpret review comments as blockers, or decide whether a pull request is mergeable.
+
+For cross-worktree investigation that also needs related issue bodies/comments, assignments, Project references, and failed-check summaries, use `flybridge operator snapshot` with the same `--config`. Path filters limit Orca and git selection before GitHub enrichment. `focused_refs` and `focused_worktrees` identify the requested assignee's work; the complete related facts remain available for context. Warnings, failures, and source URLs must be inspected before any separate merge-readiness judgment.
 
 To join Project issues to local checkouts, run `flybridge board screen --with-refs`. That command intersects canonical GitHub issue URLs (Orca comments, same-repo linked issues, and issue body URLs) with GitHub development refs, including parent and submodule branch heads. Unmatched selected checkouts appear in `unmatched_worktrees`. It does not parse worktree directory names and does not decide whether work is unstarted.
 

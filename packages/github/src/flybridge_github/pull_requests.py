@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,11 +125,28 @@ class GitHubPullRequests:
             unique.append(name)
         facts: dict[str, tuple[PullRequestFact, ...]] = {}
         failures: list[PullRequestQueryFailure] = []
-        for repository in unique:
+        if not unique:
+            return facts, ()
+        # Resolve the per-process token before concurrent calls so authentication
+        # does not race or repeat for each repository.
+        try:
+            self.cli.token()
+        except GitHubCliError as exc:
+            return {}, tuple(PullRequestQueryFailure(repository, str(exc)) for repository in unique)
+
+        def attempt(repository: str) -> tuple[PullRequestFact, ...] | Exception:
             try:
-                facts[repository] = self._list_repository_with_retry(repository)
+                return self._list_repository_with_retry(repository)
             except (GitHubPullRequestError, GitHubCliError) as exc:
-                failures.append(PullRequestQueryFailure(repository, str(exc)))
+                return exc
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(attempt, unique))
+        for repository, result in zip(unique, results, strict=True):
+            if isinstance(result, Exception):
+                failures.append(PullRequestQueryFailure(repository, str(result)))
+            else:
+                facts[repository] = result
         return facts, tuple(failures)
 
     def list_authored(
