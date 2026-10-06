@@ -609,24 +609,9 @@ def test_start_compensates_an_exact_partial_response_without_a_name_lookup(
     assert error.value.terminal_handle == "terminal"
     assert len(calls) == 2
 
-    def removal_runner(arguments, **_kwargs):
-        calls.append(arguments)
-        return subprocess.CompletedProcess(
-            arguments, 0, json.dumps({"ok": True, "result": {"removed": True}}), ""
-        )
-
-    assert OrcaClient("orca-ide", runner=removal_runner).remove_worktree(
-        error.value.worktree_id
-    ) == {"removed": True}
-    assert calls[-1] == [
-        "orca-ide",
-        "worktree",
-        "rm",
-        "--worktree",
-        "id:owned",
-        "--force",
-        "--json",
-    ]
+    with pytest.raises(TypeError, match="expected_path"):
+        client.remove_worktree(error.value.worktree_id)
+    assert len(calls) == 2
 
 
 def test_start_repeats_timeout_name_lookup_with_a_fixed_bound(tmp_path: Path) -> None:
@@ -799,24 +784,12 @@ def test_repository_registration_uses_the_resolved_path(tmp_path: Path) -> None:
     assert calls == [["orca-ide", "repo", "add", "--path", str(tmp_path.resolve()), "--json"]]
 
 
-def test_remove_worktree_uses_only_the_exact_persisted_reference() -> None:
+def test_remove_worktree_refuses_an_implicit_automatic_call() -> None:
     calls: list[list[str]] = []
-
-    def runner(arguments, **_kwargs):
-        calls.append(arguments)
-        return subprocess.CompletedProcess(arguments, 0, json.dumps({"ok": True, "result": {}}), "")
-
-    OrcaClient("orca-ide", runner=runner).remove_worktree("repo::/tmp/owned")
-
-    assert calls[0] == [
-        "orca-ide",
-        "worktree",
-        "rm",
-        "--worktree",
-        "id:repo::/tmp/owned",
-        "--force",
-        "--json",
-    ]
+    client = OrcaClient("orca-ide", runner=lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(TypeError, match="expected_path"):
+        client.remove_worktree("repo::/tmp/owned")
+    assert calls == []
 
 
 def test_resume_operations_use_exact_worktree_and_replace_a_stale_terminal() -> None:

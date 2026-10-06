@@ -183,11 +183,18 @@ class ReconcileStore:
                     "AND external_reconciled_at IS NULL",
                     (item.worktree_id,),
                 ).fetchone()
+                retained = connection.execute(
+                    "SELECT 1 FROM retained_worktrees WHERE adapter_reference=?",
+                    (item.worktree_id,),
+                ).fetchone()
                 recoverable_step = bool(
                     step
                     and step["status"] == "starting"
                     and not step["adapter_reference"]
                     and owner is None
+                    # Old review attempts keep the same step marker. Only a new,
+                    # unretained allocation may recover an interrupted start.
+                    and retained is None
                 )
                 ownership = "managed" if owner or recoverable_step else "unmanaged"
                 changed = (

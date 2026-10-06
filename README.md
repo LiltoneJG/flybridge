@@ -131,3 +131,7 @@ uv run python scripts/test.py -q
 ```
 
 CI runs secret scanning, pre-commit, tests, and package builds. Install Node.js 22.13 or newer to run the Mermaid rendering check in pre-commit. Copy `.private-audit.yaml.example` to the ignored `.private-audit.yaml` before local pre-commit runs. Brand images are generated from the canonical SVG with `uv run python scripts/generate_brand_images.py` and ImageMagick. The root [LICENSE](LICENSE) is MIT.
+
+### Checkout retention
+
+Automatic completion, timeout, review retry, `workflow retire` and `workflow cleanup --apply` stop owned agents while preserving every checkout, branch and Git registration. Use `workflow cleanup --dry-run` to inspect `retained_worktrees`, and continue files from a retained path with `workflow start --attach-existing`. Deletion is a separate explicit command: `workflow remove-worktree WORKFLOW_ID --worktree-id EXACT_ORCA_ID`. Normal removal refuses unpreserved or uncertain data; `--discard-unpreserved` explicitly accepts data loss. Failed or interrupted removal requires inspection and is never automatically repeated. See the [lifecycle contract](docs/en/specification.md#workflow-contract) for detailed checks and schema compatibility.

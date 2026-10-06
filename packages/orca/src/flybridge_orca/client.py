@@ -61,7 +61,7 @@ class OrcaTimeoutError(OrcaError):
     """A timed-out call that carries no ownership evidence.
 
     Possible orphan details are deliberately not named ``worktree_id`` or
-    ``worktree_path``: compensation reads those names to force-remove a worktree,
+    ``worktree_path``: recovery reads those names to retain the exact checkout,
     and an unverified observation must never reach that path.
     """
 
@@ -1276,6 +1276,114 @@ class OrcaClient:
                 return {"already_closed": True}
             raise
 
-    def remove_worktree(self, worktree_id: str) -> dict[str, Any]:
-        """Remove only an explicitly persisted Flybridge-owned stale worktree."""
-        return self._json(["worktree", "rm", "--worktree", f"id:{worktree_id}", "--force"])
+    def inspect_worktree_removal(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> tuple[str, ...]:
+        """Fail closed: lack of preservation evidence never authorizes removal."""
+        path = Path(expected_path)
+        if not path.is_absolute() or path.resolve() != path or path.is_symlink():
+            raise OrcaError("removal requires the exact absolute non-symlink checkout path")
+        self.verify_worktree(worktree_id, expected_path)
+        terminals = self._json(["terminal", "list", "--worktree", f"id:{worktree_id}"])
+        rows = terminals.get("terminals")
+        if not isinstance(rows, list) or terminals.get("truncated"):
+            raise OrcaError("terminal state inspection is incomplete")
+        if any(
+            item.get("connected") is not False or item.get("writable") is not False for item in rows
+        ):
+            raise OrcaError("worktree has a live or uncertain terminal; removal refused")
+
+        def inspect() -> tuple[str, ...]:
+            facts = []
+            for arguments in (
+                ("rev-parse", "--verify", "HEAD"),
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+                (
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ),
+                ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+                ("submodule", "status", "--recursive"),
+                ("for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes"),
+            ):
+                result = self._git(expected_path, *arguments)
+                if result.returncode:
+                    raise OrcaError(result.stderr.strip() or "removal state inspection failed")
+                facts.append(result.stdout)
+            return tuple(facts)
+
+        facts = inspect()
+        head, common, status, ignored, submodules, published = facts
+        if not head.strip() or not common.strip():
+            raise OrcaError("removal identity is incomplete")
+        if not discard_unpreserved and (
+            status
+            or ignored
+            or submodules
+            or not published.strip()
+            or not expected_start_sha
+            or head.strip() != expected_start_sha
+        ):
+            raise OrcaError(
+                "unpreserved work or uncertain preservation; worktree retained. "
+                "Inspect it before explicitly using --discard-unpreserved"
+            )
+        return facts
+
+    def remove_worktree(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> dict[str, Any]:
+        """Explicit removal only; verify Git and filesystem completion."""
+        path = Path(expected_path)
+        facts = self.inspect_worktree_removal(
+            worktree_id,
+            expected_path=expected_path,
+            expected_start_sha=expected_start_sha,
+            discard_unpreserved=discard_unpreserved,
+        )
+        common = facts[1]
+        if (
+            self.inspect_worktree_removal(
+                worktree_id,
+                expected_path=expected_path,
+                expected_start_sha=expected_start_sha,
+                discard_unpreserved=discard_unpreserved,
+            )
+            != facts
+        ):
+            raise OrcaError("checkout changed during removal inspection; worktree retained")
+        arguments = ["worktree", "rm", "--worktree", f"id:{worktree_id}"]
+        if discard_unpreserved:
+            arguments.append("--force")
+        result = self._json(arguments)
+        registered = self._run(
+            ["git", "--git-dir", common.strip(), "worktree", "list", "--porcelain", "-z"],
+            timeout=60,
+        )
+        if registered.returncode:
+            raise OrcaError("removal completion inspection failed")
+        remaining = any(
+            entry == "worktree " + expected_path for entry in registered.stdout.split("\0")
+        )
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path_gone = True
+        else:
+            path_gone = False
+        if not path_gone or remaining:
+            raise OrcaError("worktree removal was incomplete; manual inspection required")
+        return result

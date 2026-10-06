@@ -130,4 +130,20 @@ class WorkflowRuntime(Protocol):
 
     def push_fast_forward(self, worktree_path: str) -> dict[str, str]: ...
 
-    def remove_worktree(self, worktree_id: str) -> dict[str, Any]: ...
+    def inspect_worktree_removal(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> tuple[str, ...]: ...
+
+    def remove_worktree(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> dict[str, Any]: ...

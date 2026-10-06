@@ -1082,7 +1082,7 @@ def test_partial_external_start_is_recorded_if_removal_fails(tmp_path: Path) -> 
     assert failed.status == "failed"
     assert failed.adapter_reference == "partial-id"
     assert failed.external_reconciled_at is None
-    assert "remove failed" in (failed.error or "")
+    assert service.store.retained_worktrees(requested.id)[0]["state"] == "retained"
 
 
 def test_exact_partial_create_response_is_compensated_and_reconciled(tmp_path: Path) -> None:
@@ -1112,7 +1112,7 @@ def test_exact_partial_create_response_is_compensated_and_reconciled(tmp_path: P
     assert failed.status == "failed"
     assert failed.adapter_reference == "partial-id"
     assert closed == [("partial-id", "partial-terminal")]
-    assert removed == ["partial-id"]
+    assert removed == []
 
 
 def test_keyboard_interrupt_during_start_fails_the_requested_workflow(tmp_path: Path) -> None:
@@ -1169,7 +1169,7 @@ def test_keyboard_interrupt_during_finish_is_recoverable_by_cleanup(tmp_path: Pa
     current = service.store.get(workflow.id)
     assert current.status == "cancelled"
     assert current.external_reconciled_at is not None
-    assert removed == ["owned-id"]
+    assert removed == []
 
 
 def test_cleanup_skips_a_workflow_that_completed_during_reconciliation(tmp_path: Path) -> None:
@@ -1264,10 +1264,10 @@ def test_cleanup_takes_over_a_stale_activation_claim(tmp_path: Path) -> None:
     assert current.status == "cancelled"
     assert current.external_reconciled_at is not None
     assert service.store.lifecycle_operation(workflow.id) is None
-    assert removed == ["owned-id"]
+    assert removed == []
 
 
-def test_cleanup_retries_after_external_removal_precedes_database_completion(
+def test_cleanup_retries_after_agent_stop_precedes_database_completion(
     tmp_path: Path, monkeypatch
 ) -> None:
     service = WorkflowService(WorkflowStore(tmp_path))
@@ -1310,7 +1310,7 @@ def test_cleanup_retries_after_external_removal_precedes_database_completion(
     current = service.store.get(workflow.id)
     assert current.status == "cancelled"
     assert current.external_reconciled_at is not None
-    assert removed == ["owned-id", "owned-id"]
+    assert removed == []
 
 
 def test_unowned_creation_timeout_is_diagnosed_without_removal(tmp_path: Path) -> None:
@@ -1366,12 +1366,12 @@ def test_explicit_cleanup_reconciles_a_failed_start_once(tmp_path: Path) -> None
     reconciled = service.reconcile_stale(60, lambda *_args: None, removed.append)
 
     assert [record.id for record in reconciled] == [workflow.id]
-    assert removed == ["owned-id"]
+    assert removed == []
     assert service.store.get(workflow.id).status == "failed"
     assert service.store.stale_reconcilable(60) == []
 
 
-def test_stale_cleanup_attempts_all_terminals_before_removing_worktree(tmp_path: Path) -> None:
+def test_stale_cleanup_attempts_all_terminals_and_preserves_worktree(tmp_path: Path) -> None:
     service = WorkflowService(WorkflowStore(tmp_path))
     workflow = service.store.create(tmp_path, "single", "multi-terminal", "Implement.")
     service.store.transition(workflow.id, "starting")
@@ -1397,8 +1397,8 @@ def test_stale_cleanup_attempts_all_terminals_before_removing_worktree(tmp_path:
 
     service.reconcile_stale(60, close, removed.append)
     assert attempted == ["agent", "observer"]
-    assert removed == ["owned-id"]
-    assert service.store.get(workflow.id).external_reconciled_at is not None
+    assert removed == []
+    assert service.store.get(workflow.id).external_reconciled_at is None
 
 
 def test_stale_cleanup_failure_preserves_running_state_and_lease(tmp_path: Path) -> None:
@@ -1422,12 +1422,12 @@ def test_stale_cleanup_failure_preserves_running_state_and_lease(tmp_path: Path)
 
     result = service.reconcile_stale(
         60,
-        lambda *_args: None,
-        lambda _reference: (_ for _ in ()).throw(RuntimeError("Orca unavailable")),
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("Orca unavailable")),
+        lambda _reference: pytest.fail("automatic worktree removal"),
     )
 
     assert result.reconciled == []
-    assert any("worktree removal failed" in error for error in result.errors)
+    assert any("terminal cleanup failed" in error for error in result.errors)
     assert service.store.get(workflow.id).status == "running"
     assert queue.inspect(lease.request_id)["status"] == "leased"
 
@@ -1583,7 +1583,7 @@ def test_concurrent_start_cancellation_compensates_the_returned_worktree(tmp_pat
     assert service.store.get(worker.id).status == "cancelled"
     assert service.store.get(reviewer.id).status == "cancelled"
     assert closed == ["orphan-terminal"]
-    assert removed == ["orphan-id"]
+    assert removed == []
 
 
 def test_activation_and_cancellation_are_serialized_without_reactivation(tmp_path: Path) -> None:
@@ -1664,7 +1664,7 @@ def test_starting_cancel_remains_reconcilable_if_external_update_fails(tmp_path:
     removed: list[str] = []
     reconciled = service.reconcile_stale(60, lambda *_args: None, removed.append)
     assert [record.status for record in reconciled] == ["cancelled"]
-    assert removed == ["owned-id"]
+    assert removed == []
 
 
 def test_failed_role_can_retry_only_after_external_reconciliation(tmp_path: Path) -> None:
@@ -3086,7 +3086,7 @@ def test_cleanup_continues_after_one_worktree_removal_failure(tmp_path: Path) ->
 
     assert {record.id for record in result.reconciled} == {first.id, second.id}
     assert result.errors == ()
-    assert removed == ["id:second"]
+    assert removed == []
     assert service.store.get(first.id).external_reconciled_at is not None
     assert service.store.get(second.id).external_reconciled_at is not None
 
@@ -3118,7 +3118,7 @@ def test_cleanup_records_a_missing_workflow_id_and_continues(tmp_path: Path) -> 
 
     assert [record.id for record in result.reconciled] == [workflow.id]
     assert any("missing-id" in error for error in result.errors)
-    assert removed == ["owned-id"]
+    assert removed == []
 
 
 def test_running_objective_can_be_replaced(tmp_path: Path) -> None:

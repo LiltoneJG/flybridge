@@ -99,8 +99,8 @@ def test_retire_keep_manager_closes_children_only(tmp_path: Path) -> None:
     assert ("repo::worker", "term-worker") in result.closed_handles
     assert ("repo::reviewer", "term-reviewer") in result.closed_handles
     assert ("repo::manager", "term-manager") not in result.closed_handles
-    assert result.removed_worktrees == ("repo::worker", "repo::reviewer")
-    assert result.kept == ("repo::manager",)
+    assert result.removed_worktrees == ()
+    assert set(result.kept) == {"repo::manager", "repo::worker", "repo::reviewer"}
     assert service.store.get(manager.id).external_reconciled_at is None
     assert service.store.get(worker.id).external_reconciled_at is not None
     assert service.store.get(reviewer.id).external_reconciled_at is not None
@@ -114,10 +114,10 @@ def test_retire_keep_none_does_not_delete_attached_manager(tmp_path: Path) -> No
     result = service.retire(manager.id, runtime, keep="none")
 
     assert ("repo::manager", "term-manager") in result.closed_handles
-    assert "repo::worker" in result.removed_worktrees
-    assert "repo::reviewer" in result.removed_worktrees
+    assert "repo::worker" in result.kept
+    assert "repo::reviewer" in result.kept
     assert "repo::manager" not in result.removed_worktrees
-    assert result.kept == ("repo::manager",)
+    assert set(result.kept) == {"repo::manager", "repo::worker", "repo::reviewer"}
     assert service.store.get(manager.id).external_reconciled_at is not None
     assert "repo::manager" not in runtime.removed
 
@@ -231,21 +231,21 @@ def test_deliver_approved_fast_forward_pushes_and_rejects_force(tmp_path: Path) 
     assert store.orchestration_run(manager.id).status == "running"
 
 
-def test_retire_keep_none_after_keep_manager_skips_gone_worker(tmp_path: Path) -> None:
+def test_retire_keep_none_after_keep_manager_can_harvest_retained_worker(tmp_path: Path) -> None:
     service, manager, _worker, _reviewer = _finished_plan(tmp_path)
     runtime = RecordingRuntime()
     service.retire(manager.id, runtime, keep="manager")
-    runtime.fail_integrate = True
+    runtime.fail_integrate = False
     runtime.closed.clear()
     runtime.removed.clear()
     runtime.integrated.clear()
 
     result = service.retire(manager.id, runtime, keep="none")
 
-    assert result.harvested.skip_reason == "worker_worktree_gone"
-    assert runtime.integrated == []
+    assert result.harvested.worker_sha == "bbb222"
+    assert len(runtime.integrated) == 1
     assert ("repo::manager", "term-manager") in result.closed_handles
-    assert "repo::manager" in result.removed_worktrees
+    assert "repo::manager" in result.kept
     assert service.store.get(manager.id).external_reconciled_at is not None
 
 
@@ -276,8 +276,8 @@ def test_retire_skips_harvest_when_worker_path_is_gone(tmp_path: Path) -> None:
 
     assert result.harvested.skip_reason == "worker_worktree_gone"
     assert runtime.integrated == []
-    assert "repo::worker" in result.removed_worktrees
-    assert "repo::reviewer" in result.removed_worktrees
+    assert "repo::worker" in result.kept
+    assert "repo::reviewer" in result.kept
     assert service.store.get(worker.id).external_reconciled_at is not None
     assert service.store.get(manager.id).cleanup_error is None
 
@@ -313,4 +313,18 @@ def test_try_retire_keep_manager_succeeds_when_worker_path_is_gone(tmp_path: Pat
     assert service.store.orchestration_run(manager.id).status == "completed"
     assert service.store.get(manager.id).cleanup_error is None
     assert service.store.get(worker.id).external_reconciled_at is not None
-    assert "repo::worker" in runtime.removed
+    assert runtime.removed == []
+
+
+def test_retire_does_not_report_a_verified_deleted_checkout_as_kept(tmp_path: Path) -> None:
+    service, manager, worker, _reviewer = _finished_plan(tmp_path)
+    runtime = RecordingRuntime()
+    service.retire(manager.id, runtime, keep="manager")
+    service.store.claim_worktree_removal(worker.id, "repo::worker")
+    service.store.finish_worktree_removal("repo::worker")
+    runtime.closed.clear()
+    result = service.retire(manager.id, runtime, keep="manager")
+    assert result.harvested.skip_reason == "worker_worktree_gone"
+    assert "repo::worker" not in result.kept
+    assert not any(reference == "repo::worker" for reference, _handle in runtime.closed)
+    assert runtime.removed == []

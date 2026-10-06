@@ -7,11 +7,24 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE retained_worktrees (
+        adapter_reference TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id),
+        worktree_path TEXT NOT NULL,
+        start_sha TEXT,
+        owns_worktree INTEGER NOT NULL CHECK(owns_worktree IN (0, 1)),
+        state TEXT NOT NULL CHECK(state IN ('retained', 'removing', 'remove_failed', 'deleted')),
+        error TEXT,
+        retained_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE workflow_runs (
         id TEXT PRIMARY KEY,
@@ -630,7 +643,15 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 5")
-        return 5
+        version = 5
+    if version == 5:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE retained_worktrees" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 6")
+        return 6
     return version
 
 

@@ -601,6 +601,12 @@ class WorkflowStore:
                 raise ValueError("workflow was not found")
             if row["status"] != WorkflowStatus.STARTING.value:
                 raise ValueError("external metadata can only be attached while starting")
+            removal = connection.execute(
+                "SELECT state FROM retained_worktrees WHERE adapter_reference=?",
+                (adapter_reference,),
+            ).fetchone()
+            if removal is not None and removal["state"] in {"removing", "remove_failed", "deleted"}:
+                raise AdapterReferenceConflict("worktree deletion is unresolved or complete")
             owner = connection.execute(
                 """
                 SELECT id FROM workflows
@@ -671,6 +677,12 @@ class WorkflowStore:
             ).fetchone()
             if row is None or row["status"] != WorkflowStatus.STARTING.value:
                 raise ValueError("partial external metadata can only attach while starting")
+            removal = connection.execute(
+                "SELECT state FROM retained_worktrees WHERE adapter_reference=?",
+                (adapter_reference,),
+            ).fetchone()
+            if removal is not None and removal["state"] in {"removing", "remove_failed", "deleted"}:
+                raise AdapterReferenceConflict("worktree deletion is unresolved or complete")
             owner = connection.execute(
                 """
                 SELECT id FROM workflows
@@ -2537,6 +2549,89 @@ class WorkflowStore:
                 (cutoff,),
             ).fetchall()
         return [self._record(row) for row in rows]
+
+    def retain_worktree(self, workflow_id: str) -> None:
+        """Record a preserved checkout independently of released agent ownership."""
+        workflow = self.get(workflow_id)
+        if workflow.adapter_reference and workflow.worktree_path:
+            self.record_retained_worktree(
+                workflow.id,
+                workflow.adapter_reference,
+                workflow.worktree_path,
+                workflow.start_sha,
+                owns_worktree=workflow.owns_worktree,
+            )
+
+    def record_retained_worktree(
+        self,
+        workflow_id: str,
+        adapter_reference: str,
+        worktree_path: str,
+        start_sha: str | None,
+        *,
+        owns_worktree: bool,
+    ) -> None:
+        """Keep exact partial-allocation and prior-review identities for operator recovery."""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO retained_worktrees VALUES (?, ?, ?, ?, ?, 'retained', NULL, ?, ?) "
+                "ON CONFLICT(adapter_reference) DO NOTHING",
+                (
+                    adapter_reference,
+                    workflow_id,
+                    worktree_path,
+                    start_sha,
+                    int(owns_worktree),
+                    now,
+                    now,
+                ),
+            )
+
+    def retained_worktrees(self, workflow_id: str | None = None) -> tuple[dict[str, object], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM retained_worktrees"
+                + (" WHERE workflow_id = ?" if workflow_id else "")
+                + " ORDER BY retained_at",
+                (workflow_id,) if workflow_id else (),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def claim_worktree_removal(self, workflow_id: str, adapter_reference: str) -> dict[str, object]:
+        """Do not retry uncertain deletion or race a newly attached owner."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM retained_worktrees WHERE workflow_id=? AND adapter_reference=?",
+                (workflow_id, adapter_reference),
+            ).fetchone()
+            if row is None or row["state"] != "retained" or not row["owns_worktree"]:
+                raise ValueError(
+                    "only an explicitly retained owned worktree can be removed; "
+                    "failed or interrupted removal requires inspection"
+                )
+            owner = connection.execute(
+                "SELECT 1 FROM workflows WHERE adapter_reference=? AND external_reconciled_at IS NULL",
+                (adapter_reference,),
+            ).fetchone()
+            if owner:
+                raise ValueError("worktree still has an agent owner; stop it before removal")
+            connection.execute(
+                "UPDATE retained_worktrees SET state='removing', updated_at=? WHERE adapter_reference=?",
+                (_now(), adapter_reference),
+            )
+        return dict(row)
+
+    def finish_worktree_removal(self, adapter_reference: str, *, error: str | None = None) -> None:
+        with self._connect() as connection:
+            updated = connection.execute(
+                "UPDATE retained_worktrees SET state=?, error=?, updated_at=? "
+                "WHERE adapter_reference=? AND state='removing'",
+                ("remove_failed" if error else "deleted", error, _now(), adapter_reference),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("worktree removal ownership was lost")
 
     def mark_external_reconciled(self, workflow_id: str) -> WorkflowRecord:
         with self._connect() as connection:
