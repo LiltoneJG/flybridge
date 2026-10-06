@@ -22,6 +22,8 @@ def single_report_current(connection, workflow_id: str, terminal_handle: str | N
         "AND COALESCE(p.final, 1) = 1 "
         "AND (w.activated_at IS NULL OR s.reported_at >= w.activated_at) "
         "AND NOT EXISTS (SELECT 1 FROM queue_requests q WHERE q.owner = w.id "
+        "AND q.created_at > s.reported_at) "
+        "AND NOT EXISTS (SELECT 1 FROM queue_requests q WHERE q.owner = w.id "
         "AND q.status IN ('waiting', 'leased')) "
         "AND NOT EXISTS (SELECT 1 FROM queue_result_notifications n "
         "JOIN queue_requests q ON q.id = n.request_id "
@@ -177,7 +179,11 @@ class BatchStore:
                 activation = connection.execute(
                     "SELECT activated_at FROM workflows WHERE id = ?", (workflow_id,)
                 ).fetchone()[0]
-                if activation is None or previous["reported_at"] >= activation:
+                fresh_activation = activation is None or previous["reported_at"] >= activation
+                if fresh_activation and (
+                    not final
+                    or single_report_current(connection, workflow_id, workflow["terminal_handle"])
+                ):
                     return
             connection.execute(
                 "INSERT INTO single_report_phases VALUES (?, ?) "

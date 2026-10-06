@@ -418,3 +418,48 @@ def test_cli_checkpoint_and_final_report_use_distinct_contracts(
     assert main(arguments) == 0
     assert batches.single_report(single_id)["final"] is True
     assert batches.single_report(single_id)["current"] is True
+
+
+@pytest.mark.parametrize("resource_work", ["manual", "cancelled-wait", "job", "promoted-job"])
+def test_new_resource_request_permanently_invalidates_old_final_report(
+    tmp_path: Path, resource_work: str
+) -> None:
+    store = WorkflowStore(tmp_path)
+    queue = ResourceQueue(tmp_path)
+    batches = BatchStore(tmp_path)
+    single_id = _single(store, tmp_path / "single", "resource-history")
+    terminal = store.get(single_id).terminal_handle
+    batch_id = batches.create("parent", "parent-worktree")
+    batches.add_item(batch_id, 0, "/single", single_id, None)
+    batches.seal(batch_id)
+    batches.report_single(single_id, "blocked", "Original report.")
+    if resource_work in {"job", "promoted-job"}:
+        if resource_work == "promoted-job":
+            holder = queue.acquire("checks", "other-owner")
+        request = queue.acquire(
+            "checks",
+            single_id,
+            job_argv=["mock-checker"],
+            cleanup_check="/mock/cleanup-proof",
+            worktree_path=str(tmp_path),
+        )
+        if resource_work == "promoted-job":
+            assert not request.granted
+            assert queue.release(holder.lease_id or "") == request.request_id
+        assert queue.claim_job(request.request_id) is not None
+        queue.finish_job(request.request_id, command_exit_code=1, check_exit_code=0)
+        assert not batches.single_reported(single_id, terminal)
+        queue.acknowledge_result(request.request_id, single_id)
+    elif resource_work == "cancelled-wait":
+        queue.acquire("checks", "other-owner")
+        request = queue.acquire("checks", single_id)
+        assert not request.granted
+        queue.cancel(request.request_id)
+    else:
+        request = queue.acquire("checks", single_id)
+        queue.release(request.lease_id or "")
+    assert not batches.single_reported(single_id, terminal)
+    assert not batches.status(batch_id)["ready"]
+    assert batches.single_report(single_id)["current"] is False
+    batches.report_single(single_id, "blocked", "Original report.")
+    assert batches.single_reported(single_id, terminal)

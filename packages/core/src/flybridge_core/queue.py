@@ -98,9 +98,9 @@ class ResourceQueue:
             raise ValueError("resource and owner are required")
         resource = resource.strip()
         owner = owner.strip()
-        now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = _now()
             finishing = connection.execute(
                 "SELECT 1 FROM workflow_lifecycle_operations WHERE workflow_id = ?", (owner,)
             ).fetchone()
