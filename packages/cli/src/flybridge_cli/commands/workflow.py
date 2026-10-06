@@ -1512,6 +1512,16 @@ def handle(args: argparse.Namespace) -> int:
                     "blocker": blocker,
                     "single_report": BatchStore(config.state_dir).single_report(workflow.id),
                     "owner_agent_state": _owner_terminal_state(workflow, client),
+                    "prompt_delivery": {
+                        "transport": "existing_pty",
+                        "status": "delivery_blocked",
+                        "reason": "current Orca API has no atomic agent receiver guard",
+                        "input_accepted": False,
+                        "turn_started": False,
+                        "recovery": "inspect queue/batch status; explicit ack/ack-result; "
+                        "for a stopped known Codex session use workflow resume "
+                        "--codex-session UUID --previous-agent-stopped --prompt TEXT",
+                    },
                     "children": [asdict(child) for child in store.children(workflow.id)],
                     "artifacts": [asdict(artifact) for artifact in artifacts],
                     "retained_worktrees": [
@@ -1523,6 +1533,11 @@ def handle(args: argparse.Namespace) -> int:
                     "resource_queue": {
                         "requests": active_requests,
                         "pending_results": queue.pending_results(queue_owners),
+                        "pending_grants": [
+                            notification
+                            for owner_id in queue_owners
+                            for notification in queue.pending_grants(owner_id)
+                        ],
                         "recovery_blocks": queue.owner_blocks(queue_owners),
                         "attention_after_seconds": config.queue_lease_timeout_seconds,
                         "attention_required": any(
@@ -1735,6 +1750,9 @@ def handle(args: argparse.Namespace) -> int:
             workflow.id,
             _adapter(config),
             agent=spec.agent,
+            codex_session_id=args.codex_session,
+            previous_agent_stopped=args.previous_agent_stopped,
+            followup=args.prompt,
             model=spec.model,
             response_language=config.response_language,
             skill_paths=validate_skill_paths(config.skill_paths_for(workflow.role)),
@@ -1745,7 +1763,15 @@ def handle(args: argparse.Namespace) -> int:
             ),
             observer_enabled=bool(config.queue_observer),
         )
-        print(json.dumps({"workflow": asdict(resumed)}, indent=2))
+        result = {"workflow": asdict(resumed)}
+        if args.codex_session:
+            result["continuation"] = {
+                "transport": "codex_exec_resume",
+                "session_id": args.codex_session,
+                "launch_accepted": True,
+                "turn_started": None,
+            }
+        print(json.dumps(result, indent=2))
         return 0
     target = {
         "complete": WorkflowStatus.COMPLETED,

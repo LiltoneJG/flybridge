@@ -120,9 +120,28 @@ class WorkflowRuntime(Protocol):
         model: str | None = None,
     ) -> str: ...
 
+    def validate_codex_resume(
+        self, agent: str, session_id: str, *, model: str | None = None
+    ) -> None: ...
+
+    def create_codex_resume_terminal(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        agent: str,
+        session_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+    ) -> str: ...
+
     def wait_for_agent(self, terminal_handle: str) -> None: ...
 
     def agent_owner_state(self, worktree_id: str, terminal_handle: str | None) -> str: ...
+
+    def check_prompt_delivery(self, terminal_handle: str) -> None:
+        """Side-effect-free availability check; actual writes still require atomic guards."""
+        ...
 
     def send_prompt(self, terminal_handle: str, prompt: str) -> None:
         """Submit only through an atomic receiver/process-bound agent transport.

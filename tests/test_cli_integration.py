@@ -2702,8 +2702,8 @@ def test_workflow_resume_reuses_persisted_terminal_without_creating_worktree(
     assert json.loads(capsys.readouterr().out)["workflow"]["status"] == "running"
     assert calls[0] == ("repo::/tmp/existing", "/tmp/existing")
     assert calls[1] == ("repo::/tmp/existing", "agent-existing")
-    assert calls[2] == ("wait", "agent-existing")
-    assert calls[3][0] == "agent-existing"
+    assert all(call[0] != "wait" for call in calls)
+    assert calls[2][0] == "agent-existing"
 
 
 def test_workflow_resume_enables_the_configured_queue_observer(

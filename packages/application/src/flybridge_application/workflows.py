@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from uuid import UUID
 
 from flybridge_core import (
     AdapterReferenceConflict,
@@ -649,6 +650,9 @@ class WorkflowService:
         observer_command: str | None = None,
         observer_enabled: bool | None = None,
         model: str | None = None,
+        codex_session_id: str | None = None,
+        previous_agent_stopped: bool = False,
+        followup: str | None = None,
     ) -> WorkflowRecord:
         """Resume a persisted running workflow in its exact owned Orca worktree."""
         workflow = self.store.get(workflow_id)
@@ -656,6 +660,19 @@ class WorkflowService:
             raise ValueError("only a running workflow can be resumed")
         if not workflow.adapter_reference or not workflow.worktree_path:
             raise ValueError("running workflow has incomplete persisted worktree ownership")
+        if codex_session_id is not None:
+            try:
+                codex_session_id = str(UUID(codex_session_id))
+            except ValueError as exc:
+                raise ValueError("Codex resume requires an explicit session UUID") from exc
+            if Path(agent).name != "codex":
+                raise ValueError("session resume is available only for Codex")
+        if codex_session_id is not None and not previous_agent_stopped:
+            raise ValueError("Codex session resume requires --previous-agent-stopped confirmation")
+        if previous_agent_stopped and codex_session_id is None:
+            raise ValueError("--previous-agent-stopped requires --codex-session")
+        if followup and codex_session_id is None:
+            raise ValueError("--prompt requires --codex-session")
         manager_plan, worker_verification, review_feedback = self._artifact_prompt_context(workflow)
         review_source_urls = (
             self.store.registered_source_urls(workflow.run_id)
@@ -679,6 +696,29 @@ class WorkflowService:
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        if codex_session_id is not None:
+            preflight = getattr(runtime, "validate_codex_resume", None)
+            if callable(preflight):
+                preflight(agent, codex_session_id, model=model)
+            if followup:
+                prompt += "\n\nOperator follow-up:\n" + followup
+            # Invalidate stale reports before a potentially accepted command launch.
+            self.store.mark_resumed(workflow.id)
+            replacement = runtime.create_codex_resume_terminal(
+                workflow.adapter_reference,
+                workflow.worktree_path,
+                agent,
+                codex_session_id,
+                prompt,
+                model=model,
+            )
+            try:
+                self._replace_agent_terminal(workflow, runtime, replacement)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
+                raise
+            self.store.record_agent_run(workflow.id, agent, replacement, model=model)
+            return self._after_resume(workflow.id, runtime, observer_command, observer_enabled)
         terminal_handle = workflow.terminal_handle
         if not runtime.terminal_is_valid(workflow.adapter_reference, terminal_handle):
             if workflow.mode == WorkflowMode.SINGLE:
@@ -704,6 +744,9 @@ class WorkflowService:
             return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
         if not terminal_handle:
             raise ValueError("running workflow has no resumable agent terminal")
+        preflight = getattr(runtime, "check_prompt_delivery", None)
+        if callable(preflight):
+            preflight(terminal_handle)
         if workflow.mode == WorkflowMode.SINGLE:
             self.store.mark_resumed(workflow.id)
         runtime.send_prompt(terminal_handle, prompt)

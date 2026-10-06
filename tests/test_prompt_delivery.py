@@ -244,3 +244,143 @@ def test_batch_notification_remains_pending_when_parent_becomes_shell(
     assert status["status"] != "notified"
     assert "delivery_blocked" in status["notification_error"]
     assert receiver.shell_input == []
+
+
+def test_official_codex_resume_uses_quoted_argv_in_a_fresh_terminal() -> None:
+    import shlex
+
+    calls = []
+    session = "12345678-1234-1234-1234-123456789abc"
+    prompt = "Continue `queue release LEASE`; $(touch /mock/never) 'quoted'\nnext line"
+
+    def run(arguments, **_kwargs):
+        calls.append(arguments)
+        assert arguments[1:3] == ["terminal", "create"]
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            json.dumps({"ok": True, "result": {"terminal": {"handle": "term-new"}}}),
+            "",
+        )
+
+    client = OrcaClient("mock-orca", runner=run, which=lambda _name: "/mock/codex")
+    assert (
+        client.create_codex_resume_terminal("repo::owned", "/mock", "codex", session, prompt)
+        == "term-new"
+    )
+    command = shlex.split(calls[0][calls[0].index("--command") + 1])
+    assert command[:3] == ["/mock/codex", "exec", "resume"]
+    assert command[-2:] == [session, prompt]
+    assert "--last" not in command
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
+
+
+@pytest.mark.parametrize(
+    "agent,session", [("codex", "--last"), ("cursor", "12345678-1234-1234-1234-123456789abc")]
+)
+def test_invalid_session_resume_is_rejected_before_any_terminal_creation(agent, session) -> None:
+    receiver = MockReceiver()
+    with pytest.raises(RuntimeError):
+        OrcaClient(
+            "mock-orca", runner=receiver, which=lambda _name: "/mock/codex"
+        ).create_codex_resume_terminal("repo::owned", "/mock", agent, session, "Continue.")
+    assert receiver.calls == []
+
+
+def test_blocked_resume_preserves_current_final_report(tmp_path: Path, monkeypatch) -> None:
+    from flybridge_application import WorkflowService
+
+    store, queue = WorkflowStore(tmp_path), ResourceQueue(tmp_path)
+    owner = _owner(store, tmp_path, "reported")
+    reports = BatchStore(tmp_path)
+    reports.report_single(owner, "blocked", "Needs operator input.")
+    before = store.get(owner).activated_at
+    client = OrcaClient("mock-orca", runner=MockReceiver())
+    monkeypatch.setattr(client, "verify_worktree", lambda *_args: None)
+    monkeypatch.setattr(client, "verify_implementation_identity", None)
+    monkeypatch.setattr(client, "terminal_is_valid", lambda *_args: True)
+    with pytest.raises(PromptDeliveryBlocked):
+        WorkflowService(store, queue).resume(
+            owner, client, agent="codex", response_language="English", skill_paths=()
+        )
+    assert store.get(owner).activated_at == before
+    assert reports.single_report(owner)["current"] is True
+
+
+def test_known_session_followup_preserves_lease_and_does_not_close_old_terminal(
+    tmp_path: Path,
+) -> None:
+    from flybridge_application import WorkflowService
+
+    store, queue = WorkflowStore(tmp_path), ResourceQueue(tmp_path)
+    owner = _owner(store, tmp_path, "continued")
+    lease = queue.acquire("checks", owner)
+    calls = []
+
+    class Runtime:
+        def verify_worktree(self, *_args):
+            pass
+
+        def create_codex_resume_terminal(self, reference, path, agent, session, prompt, **kwargs):
+            calls.append((reference, agent, session, prompt))
+            return "term-resumed"
+
+        def close_terminals(self, *_args):
+            raise AssertionError("must not close the old terminal")
+
+    service = WorkflowService(store, queue)
+    session = "12345678-1234-1234-1234-123456789abc"
+    with pytest.raises(ValueError, match="previous-agent-stopped"):
+        service.resume(
+            owner,
+            Runtime(),
+            agent="codex",
+            response_language="English",
+            skill_paths=(),
+            codex_session_id=session,
+        )
+    assert calls == []
+    resumed = service.resume(
+        owner,
+        Runtime(),
+        agent="codex",
+        response_language="English",
+        skill_paths=(),
+        codex_session_id=session,
+        previous_agent_stopped=True,
+        followup="Inspect the pending grant and continue.",
+    )
+    assert resumed.terminal_handle == "term-resumed"
+    assert calls[0][2] == session
+    assert "Inspect the pending grant and continue." in calls[0][3]
+    assert queue.inspect(lease.request_id)["status"] == "leased"
+    assert queue.inspect(lease.request_id)["owner"] == owner
+
+
+def test_workflow_status_exposes_blocked_delivery_and_pending_grant(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from flybridge_cli.main import main
+
+    config_path = write_config(tmp_path / "config.jsonc", state_dir=tmp_path / "state")
+    config = load_config(config_path)
+    dispatcher = QueueDispatcher(config)
+    holder = _owner(dispatcher.store, tmp_path, "holder")
+    waiter = _owner(dispatcher.store, tmp_path, "waiter")
+    first = dispatcher.queue.acquire("checks", holder)
+    grant = dispatcher.queue.acquire("checks", waiter)
+    dispatcher.queue.release(first.lease_id or "")
+    client = OrcaClient("mock-orca", runner=MockReceiver())
+    dispatcher.client = client
+    dispatcher._deliver_grants()
+    monkeypatch.setattr(workflow_command, "_adapter", lambda _config: client)
+    monkeypatch.setattr(workflow_command, "_sync_orca", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(client, "terminal_is_valid", lambda *_args: True)
+    assert main(["--config", str(config_path), "workflow", "status", waiter]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["prompt_delivery"]["status"] == "delivery_blocked"
+    assert status["prompt_delivery"]["turn_started"] is False
+    assert "--codex-session" in status["prompt_delivery"]["recovery"]
+    pending = status["resource_queue"]["pending_grants"][0]
+    assert pending["request_id"] == grant.request_id
+    assert "delivery_blocked" in pending["last_error"]

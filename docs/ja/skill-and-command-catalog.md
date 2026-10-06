@@ -82,3 +82,5 @@ Orca workspace の merge readiness に関する「事実」が必要な agent �
 Project issue をローカル checkout と結合するには、`flybridge board screen --with-refs` を実行します。このコマンドは正規 GitHub issue URL（Orca comment、同一 repository の linked issue、issue body 内の URL）と GitHub development ref（親および submodule の branch head を含む）の集合交差で照合します。どの issue とも交差しない selected checkout は `unmatched_worktrees` に出ます。worktree のディレクトリ名を解析せず、作業が未着手かどうかも決定しません。
 
 提出した pull request の事実が必要な agent は、同じ `--config` で `flybridge prs screen` を実行しなければなりません。review・comment・thread 本文が必要なら `--with-review-facts` を付けます。`flybridge prs screen` 自体が失敗した場合を除き、使い捨ての collector や生の `gh search` を書いてはなりません。worktree 結合も merge 可否の判定も出しません。
+
+現在の Orca API では既存 PTY への配送を明示拒否し、`workflow status` で制約・未配送 grant/result の error を確認できます。queue 照会と明示 ACK は利用できます。operator が旧 agent の停止と session の所有者を確認した既知 Codex session は、`workflow resume WORKFLOW --codex-session UUID --previous-agent-stopped --prompt TEXT` により、新規 terminal で quote 済み引数を渡して公式 resume で続行できます。起動受理と turn 開始は区別し、既存 session を自動停止しません。

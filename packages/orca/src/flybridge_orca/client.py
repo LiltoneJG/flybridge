@@ -23,6 +23,7 @@ from flybridge_core import (
 
 from .resolve import (
     UnresolvedAgentError,
+    resolve_codex_resume_command,
     resolve_launch_command,
     resolve_prompt_command,
     uses_builtin_tui,
@@ -1182,30 +1183,7 @@ class OrcaClient:
         except UnresolvedAgentError as exc:
             raise OrcaError(str(exc)) from exc
         if command is not None:
-            # A one-shot agent may outlast Orca's terminal-create wait. Use a unique
-            # title so an accepted create can be recovered after that timeout.
-            launch_title = f"{title} {secrets.token_hex(8)}"
-            try:
-                result = self._json(
-                    [
-                        "terminal",
-                        "create",
-                        "--worktree",
-                        f"id:{worktree_id}",
-                        "--title",
-                        launch_title,
-                        "--command",
-                        command,
-                    ]
-                )
-            except OrcaError as exc:
-                if exc.code != "timeout" and not isinstance(exc, OrcaTimeoutError):
-                    raise
-                recovered = self._find_terminal_by_title(worktree_id, launch_title)
-                if recovered is None:
-                    raise
-                return recovered
-            return self._handle(result, "terminal")
+            return self._create_prompt_terminal(worktree_id, title, command)
         terminal = self.create_agent_terminal(worktree_id, agent, title=title, model=model)
         try:
             self.wait_for_agent(terminal)
@@ -1233,6 +1211,67 @@ class OrcaClient:
             and isinstance(terminal.get("handle"), str)
         ]
         return str(matches[0]["handle"]) if len(matches) == 1 else None
+
+    def validate_codex_resume(
+        self, agent: str, session_id: str, *, model: str | None = None
+    ) -> None:
+        """Reject unsupported command configuration before invalidating reports."""
+        try:
+            resolve_codex_resume_command(
+                agent, session_id, "", model=model, presets=self.launch_presets, which=self.which
+            )
+        except UnresolvedAgentError as exc:
+            raise OrcaError(str(exc)) from exc
+
+    def create_codex_resume_terminal(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        agent: str,
+        session_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+    ) -> str:
+        """Start the official resume command in a fresh owned terminal."""
+        try:
+            command = resolve_codex_resume_command(
+                agent,
+                session_id,
+                prompt,
+                model=model,
+                presets=self.launch_presets,
+                which=self.which,
+            )
+        except UnresolvedAgentError as exc:
+            raise OrcaError(str(exc)) from exc
+        return self._create_prompt_terminal(worktree_id, "FLYBRIDGE CODEX RESUME", command)
+
+    def _create_prompt_terminal(self, worktree_id: str, title: str, command: str) -> str:
+        # A one-shot agent may outlast Orca's terminal-create wait. Use a unique
+        # title so an accepted create can be recovered after that timeout.
+        launch_title = f"{title} {secrets.token_hex(8)}"
+        try:
+            result = self._json(
+                [
+                    "terminal",
+                    "create",
+                    "--worktree",
+                    f"id:{worktree_id}",
+                    "--title",
+                    launch_title,
+                    "--command",
+                    command,
+                ]
+            )
+        except OrcaError as exc:
+            if exc.code != "timeout" and not isinstance(exc, OrcaTimeoutError):
+                raise
+            recovered = self._find_terminal_by_title(worktree_id, launch_title)
+            if recovered is None:
+                raise
+            return recovered
+        return self._handle(result, "terminal")
 
     def wait_for_agent(self, terminal_handle: str) -> None:
         for timeout_ms in TUI_IDLE_TIMEOUTS_MS:
@@ -1276,6 +1315,10 @@ class OrcaClient:
         even when metadata labels the PTY as an agent. Retry-request only binds an
         already accepted request and cannot make the first write safe.
         """
+        self.check_prompt_delivery(terminal_handle)
+
+    def check_prompt_delivery(self, terminal_handle: str) -> None:
+        """Side-effect-free preflight; blocked delivery must not stale reports."""
         try:
             result = self._json(["terminal", "show", "--terminal", terminal_handle])
             returned_handle = self._handle(result, "terminal")

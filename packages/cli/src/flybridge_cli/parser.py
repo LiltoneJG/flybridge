@@ -338,6 +338,16 @@ def build_parser() -> argparse.ArgumentParser:
         "resume", help="resume a persisted running workflow in its existing Orca worktree"
     )
     resume.add_argument("workflow_id", help="running workflow identifier")
+    resume.add_argument(
+        "--codex-session",
+        help="explicit known Codex session UUID; launches official exec resume in a fresh terminal",
+    )
+    resume.add_argument(
+        "--previous-agent-stopped",
+        action="store_true",
+        help="operator confirms the old agent process has stopped; does not stop any terminal",
+    )
+    resume.add_argument("--prompt", help="follow-up appended to the session resume prompt")
     for command in ("complete", "cancel", "fail"):
         descriptions = {
             "complete": (
