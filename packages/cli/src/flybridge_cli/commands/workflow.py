@@ -1138,6 +1138,24 @@ def _cmd_supervise(args: argparse.Namespace, config, service: WorkflowService) -
         try:
             result = _supervise_once(service, config, args.workflow_id)
         except (OSError, RuntimeError, sqlite3.OperationalError) as exc:
+            if not is_orchestrated:
+                current = service.store.get(args.workflow_id)
+                terminal = current.status != WorkflowStatus.RUNNING
+                result = {
+                    "action": "terminal" if terminal else "retry-wait",
+                    "workflow_id": current.id,
+                    "status": current.status.value,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "retry_after_seconds": config.coordinator_retry_initial_seconds,
+                }
+                print(json.dumps(result, indent=2), flush=True)
+                if terminal:
+                    service.close_watchdog(current.id, _adapter(config), "single_terminal")
+                    return 0
+                if args.once:
+                    return 0
+                time.sleep(max(config.coordinator_retry_initial_seconds, 0.01))
+                continue
             run = service.store.record_coordinator_error(
                 args.workflow_id,
                 f"{type(exc).__name__}: {exc}",
@@ -1168,6 +1186,24 @@ def _cmd_supervise(args: argparse.Namespace, config, service: WorkflowService) -
                 print(json.dumps(result, indent=2), flush=True)
                 return 0
         except (ConfigError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+            if not is_orchestrated:
+                print(
+                    json.dumps(
+                        {
+                            "action": "supervisor_error",
+                            "workflow_id": args.workflow_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                        indent=2,
+                    ),
+                    flush=True,
+                )
+                # Stop only this monitor. An error is not proof that its agent
+                # or resource work has stopped, nor a workflow terminal outcome.
+                service.close_watchdog(
+                    args.workflow_id, _adapter(config), "single_supervisor_error"
+                )
+                return 2
             run = service.store.set_orchestration_outcome(
                 args.workflow_id, "blocked", error=f"{type(exc).__name__}: {exc}"
             )
