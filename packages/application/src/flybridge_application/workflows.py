@@ -681,6 +681,8 @@ class WorkflowService:
         self._verify_persisted_identity(workflow, runtime)
         terminal_handle = workflow.terminal_handle
         if not runtime.terminal_is_valid(workflow.adapter_reference, terminal_handle):
+            if workflow.mode == WorkflowMode.SINGLE:
+                self.store.mark_resumed(workflow.id)
             replacement = runtime.create_new_agent_terminal(
                 workflow.adapter_reference,
                 workflow.worktree_path,
@@ -693,14 +695,24 @@ class WorkflowService:
             except (OSError, RuntimeError, ValueError, sqlite3.Error):
                 self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
                 raise
-            resumed = self.store.mark_resumed(workflow.id)
+            resumed = (
+                self.store.get(workflow.id)
+                if workflow.mode == WorkflowMode.SINGLE
+                else self.store.mark_resumed(workflow.id)
+            )
             self.store.record_agent_run(resumed.id, agent, replacement, model=model)
             return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
         if not terminal_handle:
             raise ValueError("running workflow has no resumable agent terminal")
         runtime.wait_for_agent(terminal_handle)
+        if workflow.mode == WorkflowMode.SINGLE:
+            self.store.mark_resumed(workflow.id)
         runtime.send_prompt(terminal_handle, prompt)
-        resumed = self.store.mark_resumed(workflow.id)
+        resumed = (
+            self.store.get(workflow.id)
+            if workflow.mode == WorkflowMode.SINGLE
+            else self.store.mark_resumed(workflow.id)
+        )
         self.store.record_agent_run(resumed.id, agent, terminal_handle, model=model)
         return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
 
@@ -764,6 +776,8 @@ class WorkflowService:
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        if workflow.mode == WorkflowMode.SINGLE:
+            self.store.mark_resumed(workflow.id)
         replacement = runtime.create_new_agent_terminal(
             workflow.adapter_reference,
             workflow.worktree_path,
@@ -776,7 +790,11 @@ class WorkflowService:
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
             raise
-        restarted = self.store.mark_resumed(workflow.id)
+        restarted = (
+            self.store.get(workflow.id)
+            if workflow.mode == WorkflowMode.SINGLE
+            else self.store.mark_resumed(workflow.id)
+        )
         if observer_enabled is not None:
             restarted = self.store.set_queue_observer_enabled(restarted.id, observer_enabled)
         self._ensure_observer(restarted.id, runtime, observer_command)
@@ -923,6 +941,7 @@ class WorkflowService:
         error: str | None = None,
         close_external: Callable[[str, str | None], None] | None = None,
         close_resources: bool = True,
+        timeout_snapshot: WorkflowRecord | None = None,
     ) -> WorkflowRecord:
         try:
             target = WorkflowStatus(target)
@@ -937,7 +956,9 @@ class WorkflowService:
         deadline = time.monotonic() + ACTIVATION_WAIT_SECONDS
         while True:
             try:
-                claim = self.store.claim_terminal_transition(workflow_id, target, error=error)
+                claim = self.store.claim_terminal_transition(
+                    workflow_id, target, error=error, timeout_snapshot=timeout_snapshot
+                )
                 break
             except LifecycleOperationConflict as exc:
                 if exc.kind != "activation" or time.monotonic() >= deadline:

@@ -47,7 +47,7 @@ List the absolute path to `skills/` in `skills.sources` to discover bundled `SKI
 
 Role prompts include manual acquire/release and optional queue run when `queue.resources` is non-empty. Waiting manual agents stop until the dispatcher sends a lease-id notification, then acknowledge it. They do not poll inspect or watch. Display observers do not deliver grants. An unverified abandoned lease blocks its resource until the operator confirms cleanup with `queue resolve`; `queue recover` only lists stale candidates.
 
-For parent-managed batches, pass `--notify-terminal <Orca-handle>` to `workflow start --batch`. The output includes a `batch_id`; `workflow batch status <batch-id>` shows all item outcomes and delivery state. Single agents submit `workflow single-report <id> --outcome done|blocked --summary <text>` after releasing queue requests. The parent receives one batch summary when all items are ready, then verifies and finishes single workflows.
+For parent-managed batches, pass `--notify-terminal <Orca-handle>` to `workflow start --batch`. The output includes a `batch_id`; `workflow batch status <batch-id>` shows all item outcomes and delivery state. Single agents submit `workflow single-report <id> --outcome done|blocked --summary <text>` after releasing queue requests and acknowledging job results. `--checkpoint` records non-final progress, including parked or active resource work, without making the batch ready. Current final reports wait for operator verification and are exempt from role timeout; use `workflow resume` before continuation to invalidate the previous report. The parent receives one batch summary when all items are ready, then verifies and finishes single workflows.
 
 ## Operator guidance
 

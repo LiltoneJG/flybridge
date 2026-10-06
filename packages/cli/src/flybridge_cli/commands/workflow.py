@@ -33,6 +33,7 @@ from flybridge_core import (
     issue_urls_from_text,
     parse_issue_url,
 )
+from flybridge_core.workflows import LifecycleOperationConflict
 
 from ..dispatcher import ensure_dispatcher
 from ..runtime import (
@@ -696,13 +697,23 @@ def _timeout_block(service: WorkflowService, client, workflow, reason: str) -> d
         service.store.set_orchestration_outcome(root_id, "blocked", error=reason)
     salvage = service.salvage_progress(root_id or workflow.id, client)
     if workflow.status == WorkflowStatus.RUNNING:
-        service.finish(
-            workflow.id,
-            WorkflowStatus.CANCELLED,
-            lambda reference: client.set_lifecycle(reference, WorkflowStatus.CANCELLED, reason),
-            error=reason,
-            close_external=client.close_terminals,
-        )
+        try:
+            service.finish(
+                workflow.id,
+                WorkflowStatus.CANCELLED,
+                lambda reference: client.set_lifecycle(reference, WorkflowStatus.CANCELLED, reason),
+                error=reason,
+                close_external=client.close_terminals,
+                timeout_snapshot=(
+                    workflow
+                    if workflow.mode == WorkflowMode.SINGLE and reason == "role-timeout"
+                    else None
+                ),
+            )
+        except LifecycleOperationConflict as exc:
+            if exc.kind != "freshness":
+                raise
+            return {"action": "waiting", "workflow_id": workflow.id, "reason": "state-changed"}
     if workflow.mode == WorkflowMode.ORCHESTRATED:
         if root_id is None:
             raise ValueError("orchestrated role has no root manager")
@@ -873,10 +884,8 @@ def _apply_watchdog(
     for record in records:
         if record.status != WorkflowStatus.RUNNING or record.id in waiting:
             continue
-        if (
-            record.mode == WorkflowMode.SINGLE
-            and batches.is_member(record.id)
-            and batches.single_reported(record.id, record.terminal_handle)
+        if record.mode == WorkflowMode.SINGLE and batches.single_reported(
+            record.id, record.terminal_handle
         ):
             continue
         if service.store.has_unconsumed_readiness(record.id):
@@ -936,6 +945,9 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
         waiting = set() if service.queue is None else set(service.queue.active_owners())
         if manager.id in waiting:
             return {"action": "waiting_resource", "workflow_id": manager.id}
+        manager = service.store.get(manager.id)
+        if BatchStore(config.state_dir).single_reported(manager.id, manager.terminal_handle):
+            return {"action": "reported", "workflow_id": manager.id, "status": manager.status.value}
         return {"action": "waiting", "workflow_id": manager.id}
     if manager.mode != WorkflowMode.ORCHESTRATED or manager.role != WorkflowRole.MANAGER:
         raise ValueError("workflow supervise requires an orchestrated manager or single root")
@@ -1212,6 +1224,10 @@ def _cmd_batch_watch(args: argparse.Namespace, config, batches: BatchStore) -> i
                     batches.note_notification_error(args.batch_id, "parent terminal is unavailable")
                     return 2
                 client.wait_for_agent(parent_terminal)
+                status = batches.status(args.batch_id)
+                if not status["ready"]:
+                    batches.note_notification_error(args.batch_id, "batch changed before delivery")
+                    continue
                 client.send_prompt(
                     parent_terminal,
                     "Flybridge batch is ready for review. "
@@ -1492,6 +1508,7 @@ def handle(args: argparse.Namespace) -> int:
                     "workflow": asdict(workflow),
                     "run": run,
                     "blocker": blocker,
+                    "single_report": BatchStore(config.state_dir).single_report(workflow.id),
                     "children": [asdict(child) for child in store.children(workflow.id)],
                     "artifacts": [asdict(artifact) for artifact in artifacts],
                     "retained_worktrees": [
@@ -1589,7 +1606,9 @@ def handle(args: argparse.Namespace) -> int:
     service = WorkflowService(store, ResourceQueue(config.state_dir))
     if args.workflow_command == "single-report":
         batches = BatchStore(config.state_dir)
-        batches.report_single(args.workflow_id, args.outcome, args.summary)
+        batches.report_single(
+            args.workflow_id, args.outcome, args.summary, final=not args.checkpoint
+        )
         if batches.active_batches_for_workflow(args.workflow_id):
             _maintain_batch_watchers(config, _adapter(config), args.workflow_id)
         print(json.dumps({"workflow_id": args.workflow_id, "outcome": args.outcome}))

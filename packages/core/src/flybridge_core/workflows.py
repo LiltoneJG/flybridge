@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
 
+from .batches import single_report_current
 from .database import SCHEMA_VERSION as DATABASE_SCHEMA_VERSION
 from .database import connect_database, prepare_database
 from .types import WorkflowMode, WorkflowRole, WorkflowStatus
@@ -1153,11 +1154,15 @@ class WorkflowStore:
         with self._connect() as connection:
             updated = connection.execute(
                 "UPDATE workflows SET updated_at = ?, activated_at = ? "
-                "WHERE id = ? AND status = 'running'",
+                "WHERE id = ? AND status = 'running' "
+                "AND NOT EXISTS (SELECT 1 FROM workflow_lifecycle_operations "
+                "WHERE workflow_id = workflows.id)",
                 (_now(), _now(), workflow_id),
             )
             if updated.rowcount != 1:
-                raise ValueError("only a running workflow can be marked resumed")
+                raise ValueError(
+                    "only a running workflow without a lifecycle operation can be marked resumed"
+                )
         return self.get(workflow_id)
 
     def has_unconsumed_readiness(self, workflow_id: str) -> bool:
@@ -1276,6 +1281,7 @@ class WorkflowStore:
         target: str | WorkflowStatus,
         *,
         error: str | None = None,
+        timeout_snapshot: WorkflowRecord | None = None,
     ) -> LifecycleClaim:
         """Claim one terminal outcome and snapshot ownership in the same transaction."""
         target = WorkflowStatus(target)
@@ -1288,6 +1294,22 @@ class WorkflowStore:
             if row is None:
                 raise ValueError("workflow was not found")
             workflow = self._record(row)
+            if timeout_snapshot is not None:
+                active_queue = connection.execute(
+                    "SELECT 1 FROM queue_requests WHERE owner = ? "
+                    "AND status IN ('waiting', 'leased')",
+                    (workflow_id,),
+                ).fetchone()
+                if (
+                    workflow.status != WorkflowStatus.RUNNING
+                    or workflow.activated_at != timeout_snapshot.activated_at
+                    or workflow.terminal_handle != timeout_snapshot.terminal_handle
+                    or active_queue is not None
+                    or single_report_current(connection, workflow.id, workflow.terminal_handle)
+                ):
+                    raise LifecycleOperationConflict(
+                        "role timeout observation is stale", kind="freshness"
+                    )
             operation = connection.execute(
                 "SELECT * FROM workflow_lifecycle_operations WHERE workflow_id = ?",
                 (workflow_id,),

@@ -275,11 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="reviewer outcome, or blocked for any orchestrated role",
     )
     single_report = workflow_sub.add_parser(
-        "single-report", help="record a single agent's result for its parent batch"
+        "single-report", help="record a single agent result or checkpoint"
     )
     single_report.add_argument("workflow_id")
     single_report.add_argument("--outcome", required=True, choices=["done", "blocked"])
     single_report.add_argument("--summary", required=True)
+    single_report.add_argument(
+        "--checkpoint", action="store_true", help="record progress, not a final result"
+    )
     batch = workflow_sub.add_parser("batch", help="inspect or watch a parent batch")
     batch_sub = batch.add_subparsers(dest="batch_command", required=True)
     batch_status = batch_sub.add_parser("status")

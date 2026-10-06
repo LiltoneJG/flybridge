@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -385,6 +385,12 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE single_report_phases (
+        workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+        final INTEGER NOT NULL CHECK(final IN (0, 1))
+    )
+    """,
+    """
     CREATE TABLE queue_events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
         resource TEXT NOT NULL, request_id TEXT NOT NULL, event TEXT NOT NULL
@@ -651,7 +657,15 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 6")
-        return 6
+        version = 6
+    if version == 6:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE single_report_phases" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 7")
+        return 7
     return version
 
 
