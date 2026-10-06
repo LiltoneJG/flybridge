@@ -122,7 +122,15 @@ class WorkflowRuntime(Protocol):
 
     def wait_for_agent(self, terminal_handle: str) -> None: ...
 
-    def send_prompt(self, terminal_handle: str, prompt: str) -> None: ...
+    def agent_owner_state(self, worktree_id: str, terminal_handle: str | None) -> str: ...
+
+    def send_prompt(self, terminal_handle: str, prompt: str) -> None:
+        """Submit only through an atomic receiver/process-bound agent transport.
+
+        Raise if unavailable; never fall back to raw PTY text+Enter. Successful
+        return means a verified agent turn started, not merely input acceptance.
+        """
+        ...
 
     def close_terminals(
         self, worktree_id: str, terminal_handle: str | None = None

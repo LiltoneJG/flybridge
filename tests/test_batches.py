@@ -149,6 +149,9 @@ def test_supervisor_restores_configured_observer_and_reminds_live_holder(tmp_pat
         def terminal_is_valid(self, _worktree: str, handle: str | None) -> bool:
             return bool(handle and handle not in self.closed)
 
+        def agent_owner_state(self, worktree: str, handle: str | None) -> str:
+            return "valid" if self.terminal_is_valid(worktree, handle) else "invalid"
+
         def create_observer(self, _worktree: str, _command: str) -> str:
             self.next_observer += 1
             return f"observer-{self.next_observer}"

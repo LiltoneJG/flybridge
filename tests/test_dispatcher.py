@@ -25,6 +25,9 @@ class FakeOrca:
             raise RuntimeError("Orca temporarily unavailable")
         return self.valid and handle not in self.invalid_handles
 
+    def agent_owner_state(self, reference: str, handle: str) -> str:
+        return "valid" if self.terminal_is_valid(reference, handle) else "invalid"
+
     def wait_for_agent(self, _handle: str) -> None:
         return None
 

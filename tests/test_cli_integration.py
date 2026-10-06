@@ -67,6 +67,10 @@ def _install_orca(monkeypatch, client_cls) -> None:
         client_cls.create_coordinator = lambda self, *_args, **_kwargs: "terminal:coordinator"
     if getattr(client_cls, "terminal_is_valid", None) is None:
         client_cls.terminal_is_valid = lambda self, *_args, **_kwargs: True
+    if getattr(client_cls, "agent_owner_state", None) is None:
+        client_cls.agent_owner_state = lambda self, reference, handle: (
+            "valid" if self.terminal_is_valid(reference, handle) else "invalid"
+        )
     if getattr(client_cls, "verify_worktree", None) is None:
         client_cls.verify_worktree = lambda self, *_args, **_kwargs: None
     if getattr(client_cls, "push_fast_forward", None) is None:

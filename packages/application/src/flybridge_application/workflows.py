@@ -704,7 +704,6 @@ class WorkflowService:
             return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
         if not terminal_handle:
             raise ValueError("running workflow has no resumable agent terminal")
-        runtime.wait_for_agent(terminal_handle)
         if workflow.mode == WorkflowMode.SINGLE:
             self.store.mark_resumed(workflow.id)
         runtime.send_prompt(terminal_handle, prompt)

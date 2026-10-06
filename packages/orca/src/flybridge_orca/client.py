@@ -30,7 +30,6 @@ from .resolve import (
 
 TIMEOUT_NAME_LOOKUP_ATTEMPTS = 3
 TUI_IDLE_TIMEOUTS_MS = (60_000, 120_000)
-SEND_TIMEOUT_SECONDS = 45
 
 
 class OrcaError(RuntimeError):
@@ -38,6 +37,16 @@ class OrcaError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.stdout = stdout
+
+
+class PromptDeliveryBlocked(OrcaError):
+    """No prompt input was written; recipient-safe delivery is unavailable."""
+
+    input_accepted = False
+    turn_started = False
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"delivery_blocked: {detail}", code="delivery_blocked")
 
 
 class OrcaStartError(OrcaError):
@@ -1244,19 +1253,49 @@ class OrcaClient:
                 return
         raise OrcaTimeoutError("replacement agent terminal did not become TUI-idle")
 
+    def agent_owner_state(self, worktree_id: str, terminal_handle: str | None) -> str:
+        """PTY presence/agent labels do not prove the recorded agent process is alive.
+
+        The public terminal schema has a PTY incarnation but no authoritative
+        receiver mode and agent-process incarnation. Even a stale/disconnected
+        handle is insufficient evidence to reclaim a possibly live owner's lease.
+        """
+        if not terminal_handle:
+            return "unknown"
+        try:
+            self._json(["terminal", "show", "--terminal", terminal_handle])
+        except OrcaError:
+            return "unknown"
+        return "unknown"
+
     def send_prompt(self, terminal_handle: str, prompt: str) -> None:
-        arguments = [
-            "terminal",
-            "send",
-            "--terminal",
-            terminal_handle,
-            "--text",
-            prompt,
-            "--enter",
-        ]
-        result = self._json(arguments, timeout=SEND_TIMEOUT_SECONDS)
-        if self._signal(result, "send", "accepted") is not True:
-            raise OrcaError("Orca did not accept the workflow resume prompt")
+        """Fail closed: the public send API cannot atomically bind an agent receiver.
+
+        A show/wait followed by raw text+Enter can execute the prompt in a shell
+        after voluntary exec exit or recipient takeover. Never call terminal send,
+        even when metadata labels the PTY as an agent. Retry-request only binds an
+        already accepted request and cannot make the first write safe.
+        """
+        try:
+            result = self._json(["terminal", "show", "--terminal", terminal_handle])
+            returned_handle = self._handle(result, "terminal")
+        except OrcaError as exc:
+            raise PromptDeliveryBlocked(
+                f"receiver cannot be verified: {exc}; no input written"
+            ) from exc
+        if returned_handle != terminal_handle:
+            raise PromptDeliveryBlocked("receiver handle changed; no input written")
+        terminal = self._required_object(result, "terminal")
+        if terminal.get("connected") is False or terminal.get("writable") is False:
+            raise PromptDeliveryBlocked(
+                "receiver is disconnected or not writable; no input written"
+            )
+        raise PromptDeliveryBlocked(
+            "Orca does not expose authoritative receiver mode/agent-process identity "
+            "and atomic incarnation-guarded prompt delivery; no input written. "
+            "Use official queue inspect/ack/ack-result commands or an explicitly "
+            "authorized new prompt-argument agent launch; exec and shell are not prompt receivers"
+        )
 
     def close_terminals(
         self, worktree_id: str, terminal_handle: str | None = None

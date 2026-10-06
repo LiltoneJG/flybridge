@@ -119,17 +119,16 @@ class QueueDispatcher:
         ):
             return record, "invalid"
         try:
-            valid = self.client.terminal_is_valid(record.adapter_reference, record.terminal_handle)
-        except (OSError, RuntimeError, ValueError):
+            state = self.client.agent_owner_state(record.adapter_reference, record.terminal_handle)
+        except (OSError, RuntimeError, ValueError, AttributeError):
             return record, "unknown"
-        return record, "valid" if valid else "invalid"
+        return record, state if state in {"valid", "invalid"} else "unknown"
 
     def _send(self, owner_id: str, prompt: str) -> str | None:
         record, state = self._owner(owner_id)
         if state != "valid" or record is None:
-            return f"owner terminal {state}"
+            return f"delivery_blocked: owner agent {state}; no prompt input written"
         try:
-            self.client.wait_for_agent(record.terminal_handle)
             self.client.send_prompt(record.terminal_handle, prompt)
         except (OSError, RuntimeError, ValueError) as exc:
             return str(exc)

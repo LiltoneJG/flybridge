@@ -168,3 +168,11 @@ stateDiagram-v2
 対象への外部 editor・ツールの書込みを止めてから明示削除してください。Flybridge の削除 claim と直前の再検査は外部プロセスを排他しません。削除後は directory 不在と Git 登録の消失を検証します。失敗は `remove_failed`、途中で実行プロセスが落ちた場合は `removing` として保持し、勝手に prune・再削除・成功記録を行いません。部分失敗は調査・復旧が必要です。自動 GC はありません。
 
 `external_reconciled_at` は agent 所有権の解放であり物理削除を意味しません。schema 5→6 は保持台帳を追加するだけで、古い reconciled record の削除事実を推測しません。旧 executable は schema 6 を拒否するため、新旧 supervisor を同じ state directory で混在させないでください。
+
+### 通知の受信プロセス安全境界
+
+現在の公開 Orca API では、既存 PTY への prompt 配送は明示的に利用不可です。`terminal show` の PTY identity と agent label、terminal の存在や idle signal は、実 agent process の生存・incarnation・受信 mode を保証しません。`terminal send` には最初の入力を原子的に保護する receiver guard がなく、`--retry-request` は受理済み request のみを束縛します。確認後に exec が終了したり担当が交代したりすると、text と Enter が shell に届き Markdown/backticks を実行できます。このため Flybridge は raw send を呼びません。grant、result、lease reminder、batch 通知、既存 terminal の resume は `delivery_blocked` で拒否し、入力受理も turn 開始も起こしません。prompt 引数による新規起動は利用できますが、起動後の PTY 入力を要する preset も拒否します。
+
+未配送 grant/result は ID、試行回数、error とともに公式 `queue ack`/`queue ack-result` まで永続化します。queue status/inspect と batch status で確認し、shell に prompt を再送しません。waiting は park のままで、配送失敗は workflow 完了の根拠にしません。terminal が不存在・stale でも、それだけで lease を回収しません。`workflow status` の `owner_agent_state` は terminal 存在とは別で、現在の adapter は `unknown` を返して生存し得る owner を保全します。operator の明示復旧には引き続き cleanup 確認が必要です。既存 terminal の続行は利用不可で、明示承認された prompt 引数による新規 agent 起動が必要です。既存 session は再起動しません。
+
+将来の配送 transport は、入力時に receiver mode・実 agent process・incarnation を原子的に束縛し、確認後の交代も拒否する必要があります。`input_accepted` と検証済み `turn_started` を区別し、入力受理だけで配送成功や重複 retry の根拠にしません。

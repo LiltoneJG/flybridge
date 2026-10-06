@@ -169,17 +169,20 @@ def _owner_terminal_state(workflow, client) -> str:
     ):
         return "invalid"
     try:
-        return (
-            "valid"
-            if client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle)
-            else "invalid"
-        )
+        state = client.agent_owner_state(workflow.adapter_reference, workflow.terminal_handle)
+        return state if state in {"valid", "invalid"} else "unknown"
     except (OSError, RuntimeError, ValueError, AttributeError):
         return "unknown"
 
 
 def _owner_terminal_valid(workflow, client) -> bool:
-    return _owner_terminal_state(workflow, client) == "valid"
+    """Observe terminal presence for UI/observer upkeep, not agent liveness."""
+    if client is None or not workflow.adapter_reference or not workflow.terminal_handle:
+        return False
+    try:
+        return client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle)
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        return False
 
 
 def _workflow_list_item(workflow, *, owner_terminal_valid: bool) -> dict[str, object]:
@@ -800,7 +803,6 @@ def _maintain_queue(service: WorkflowService, config, client, root_id: str) -> N
                     owner.id,
                 ]
             )
-            client.wait_for_agent(owner.terminal_handle)
             client.send_prompt(
                 owner.terminal_handle,
                 f"Flybridge queue reminder: you still hold resource `{item['resource']}` "
@@ -1509,6 +1511,7 @@ def handle(args: argparse.Namespace) -> int:
                     "run": run,
                     "blocker": blocker,
                     "single_report": BatchStore(config.state_dir).single_report(workflow.id),
+                    "owner_agent_state": _owner_terminal_state(workflow, client),
                     "children": [asdict(child) for child in store.children(workflow.id)],
                     "artifacts": [asdict(artifact) for artifact in artifacts],
                     "retained_worktrees": [

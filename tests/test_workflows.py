@@ -2234,16 +2234,16 @@ def test_resume_after_store_reopen_reuses_a_valid_agent_terminal(tmp_path: Path)
     assert resumed.terminal_handle == "agent-old"
     assert calls[0] == ("repo::/tmp/existing", "/tmp/existing")
     assert calls[1] == ("repo::/tmp/existing", "agent-old")
-    assert calls[2] == ("wait", "agent-old")
-    assert calls[3][0] == "agent-old"
-    assert "Continue this objective: Implement." in calls[3][1]
-    assert f"Primary issue: {issue_url}" in calls[3][1]
-    assert "single role" in calls[3][1]
-    assert "Respond in Japanese." in calls[3][1]
-    assert "`device`" not in calls[3][1]
-    assert "device" in calls[3][1]
-    assert "queue" in calls[3][1]
-    assert "Flybridge MCP" not in calls[3][1]
+    assert all(call[0] != "wait" for call in calls)
+    assert calls[2][0] == "agent-old"
+    assert "Continue this objective: Implement." in calls[2][1]
+    assert f"Primary issue: {issue_url}" in calls[2][1]
+    assert "single role" in calls[2][1]
+    assert "Respond in Japanese." in calls[2][1]
+    assert "`device`" not in calls[2][1]
+    assert "device" in calls[2][1]
+    assert "queue" in calls[2][1]
+    assert "Flybridge MCP" not in calls[2][1]
 
 
 def test_resume_replaces_stale_agent_and_recreates_its_observer(tmp_path: Path) -> None:
