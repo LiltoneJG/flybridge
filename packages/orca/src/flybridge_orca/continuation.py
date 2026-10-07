@@ -30,11 +30,15 @@ def inspect_process(
     matches = []
     started = None
     for directory in proc.iterdir():
-        if not directory.name.isdigit() or directory.stat().st_uid != os.getuid():
+        if not directory.name.isdigit():
             continue
         try:
+            if directory.stat().st_uid != os.getuid():
+                continue
             raw = (directory / "cmdline").read_bytes()
         except FileNotFoundError:
+            if int(directory.name) == agent_pid:
+                raise
             continue
         argv = [arg.decode() for arg in raw.split(b"\0") if arg]
         if not argv or Path(argv[0]).name != "codex":

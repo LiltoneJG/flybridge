@@ -625,3 +625,39 @@ def test_final_local_verification_has_no_orca_rpc(tmp_path, monkeypatch, wrong):
     else:
         client.verify_timeout_continuation_local(*args)
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("disappears", [True, False])
+def test_unrelated_process_stat_disappearance_only_is_skipped(tmp_path, monkeypatch, disappears):
+    from pathlib import Path
+
+    proc = tmp_path / "proc"
+    boot = proc / "sys/kernel/random"
+    boot.mkdir(parents=True)
+    (boot / "boot_id").write_text("boot")
+    proc_actor(proc, 123, tmp_path)
+    phantom = proc / "999"
+    listing, stat = Path.iterdir, Path.stat
+
+    def entries(path):
+        if path == proc:
+            return iter([phantom, *listing(path)])
+        return listing(path)
+
+    def checked(path, *args, **kwargs):
+        if path == phantom:
+            if disappears:
+                raise FileNotFoundError("unrelated process exited")
+            raise PermissionError("process evidence unavailable")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "iterdir", entries)
+    monkeypatch.setattr(Path, "stat", checked)
+    if disappears:
+        assert (
+            inspect_process("repo::checkout", str(tmp_path), "old", "new", SESSION, 123, proc=proc)
+            == "boot:100"
+        )
+    else:
+        with pytest.raises(PermissionError):
+            inspect_process("repo::checkout", str(tmp_path), "old", "new", SESSION, 123, proc=proc)
