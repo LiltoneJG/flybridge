@@ -637,6 +637,97 @@ class WorkflowService:
         """Return an Orca-linkable issue only for the implementation repository itself."""
         return _matching_github_issue_number(repository, issue_url)
 
+    def continue_timeout(
+        self,
+        workflow_id: str,
+        runtime: WorkflowRuntime,
+        *,
+        terminal: str,
+        session: str,
+        agent_pid: int,
+        objective: str,
+        expected_head: str,
+        name: str | None = None,
+        apply: bool = False,
+    ) -> dict[str, object]:
+        """Adopt an existing actor; never create, send to, or close a terminal."""
+        session = str(UUID(session))
+        if len(expected_head) != 40 or any(c not in "0123456789abcdef" for c in expected_head):
+            raise ValueError("continuation requires an exact full lowercase expected HEAD SHA")
+        source = self.store.get(workflow_id)
+        if not source.adapter_reference or not source.worktree_path or not source.terminal_handle:
+            raise ValueError("source worktree identity is incomplete")
+        runtime.verify_worktree(source.adapter_reference, source.worktree_path)
+        repository, runtime_id, start_sha = runtime.implementation_identity(
+            source.adapter_reference, source.worktree_path
+        )
+        if (
+            repository != source.implementation_repository
+            or runtime_id != source.runtime_repository_id
+            or start_sha != expected_head
+            or runtime.uncommitted_changes(source.worktree_path)
+        ):
+            raise ValueError("continuation implementation identity differs")
+        proof = runtime.inspect_timeout_continuation(
+            source.adapter_reference,
+            source.worktree_path,
+            source.terminal_handle,
+            terminal,
+            session,
+            agent_pid,
+        )
+
+        def verify() -> None:
+            runtime.verify_worktree(source.adapter_reference, source.worktree_path)
+            if runtime.implementation_identity(source.adapter_reference, source.worktree_path) != (
+                repository,
+                runtime_id,
+                expected_head,
+            ) or runtime.uncommitted_changes(source.worktree_path):
+                raise ValueError("continuation checkout identity/HEAD/clean state changed")
+            if (
+                runtime.inspect_timeout_continuation(
+                    source.adapter_reference,
+                    source.worktree_path,
+                    source.terminal_handle,
+                    terminal,
+                    session,
+                    agent_pid,
+                )
+                != proof
+            ):
+                raise ValueError("continuation actor identity changed during adoption")
+
+        verify()  # Complete all Orca RPCs before taking the shared database write lock.
+
+        def verify_local() -> None:
+            runtime.verify_timeout_continuation_local(
+                source.adapter_reference,
+                source.worktree_path,
+                source.terminal_handle,
+                terminal,
+                session,
+                agent_pid,
+                repository,
+                runtime_id,
+                expected_head,
+                proof,
+            )
+
+        return self.store.continue_timeout(
+            workflow_id,
+            terminal=terminal,
+            session=session,
+            proof=proof,
+            agent_pid=agent_pid,
+            name=name or f"continuation-{workflow_id}",
+            objective=objective,
+            start_sha=expected_head,
+            expected_source=source,
+            verify=verify_local,
+            apply=apply,
+        )
+
     def resume(
         self,
         workflow_id: str,

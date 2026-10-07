@@ -240,6 +240,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="repeatable status filter",
     )
     workflow_list.add_argument("--json", action="store_true", help="print JSON (default)")
+    continuation = workflow_sub.add_parser(
+        "continue-timeout", help="bind an existing resumed local Codex actor to a new single owner"
+    )
+    continuation.add_argument("workflow_id", help="cleaned timeout-cancelled single source")
+    continuation.add_argument("--terminal", required=True, help="exact existing terminal handle")
+    continuation.add_argument("--codex-session", required=True, help="exact resumed session UUID")
+    continuation.add_argument("--agent-pid", required=True, type=int, help="local Codex resume PID")
+    continuation.add_argument("--expected-head", required=True, help="exact current full Git SHA")
+    continuation.add_argument("--name", help="unique continuation workflow name")
+    continuation_objective = continuation.add_mutually_exclusive_group(required=True)
+    continuation_objective.add_argument("-o", "--objective", help="current continuation scope")
+    continuation_objective.add_argument(
+        "--objective-file", type=Path, help="current scope UTF-8 file"
+    )
+    continuation.add_argument("--apply", action="store_true", help="bind; default only validates")
     workflow_status = workflow_sub.add_parser("status", help="show one workflow and its children")
     workflow_status.add_argument("workflow_id", help="workflow identifier")
     artifact = workflow_sub.add_parser("artifact", help="manage durable workflow artifacts")

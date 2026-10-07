@@ -178,3 +178,15 @@ stateDiagram-v2
 将来の配送 transport は、入力時に receiver mode・実 agent process・incarnation を原子的に束縛し、確認後の交代も拒否する必要があります。`input_accepted` と検証済み `turn_started` を区別し、入力受理だけで配送成功や重複 retry の根拠にしません。
 
 single supervisor の終了処理は orchestration aggregate を参照しません。一時的な監視 error は `retry-wait` を表示して workflow/lease を変更せず再試行し、operator の終端遷移後は所有 monitor だけを閉じます。再試行できない single 監視 error は `supervisor_error` を表示し、非ゼロで終了して monitor だけを閉じます。agent、checkout、資源所有権は調査用に保全し、この error を orchestration の blocked/completed outcome とは扱いません。
+
+## timeout後の既存actorの継続採用
+
+`workflow continue-timeout OLD_ID --terminal HANDLE --codex-session UUID --agent-pid PID --expected-head FULL_SHA --objective-file FILE` は、正式resume済みのidleなlocal Linux Codex actorを検証します。既定はdry-runです。`--apply` は独立したrunning single workflowを作り、返された `workflow_id` をqueueとreportに使用します。現在の残scopeを必ず指定してください。旧workflowのcancelled状態、terminal、report、queue履歴、timestampは変更しません。対象はcleanup errorがなくexternal reconciliationが完了した `role-timeout` cancellationだけです。active request、未解決job、resource block、未確認resultがあれば拒否します。leaseの移動や他ownerの変更はありません。
+
+元terminalのworktree、implementation repository、runtime GUIDの一致が必要です。必須の `--expected-head` は現在のfull SHAで、HEADとclean状態を再確認します。新ownerの開始SHAはこの値です。旧SHAは不変で、この限定操作では旧SHAのancestor条件を求めません。通常resumeのidentity検証は変更しません。旧terminalの停止と同hostでの旧Codex process不在を確認します。新terminalはlocal、connected、writable、非orphan、Codex、idleでなければなりません。processのexact resume UUID、executable、cwd、`ORCA_TERMINAL_HANDLE`、`ORCA_WORKTREE_ID`、boot ID、start ticksをterminal incarnationに結び付けます。不明・不一致・曖昧・変化する証拠は拒否します。remoteと非Linuxは非対応です。idleだけではprocess停止を証明できず、この操作はPTY prompt送信機能を提供しません。
+
+各read-only Orca RPCは当routeだけ25秒上限とし、2回の外部検証をDB write lock取得前に完了します。transaction内では3秒期限のlocal Git/process最終確認とsource snapshot、name/worktree/terminal/resource競合検証だけを行い、新rootとagent ownershipとdurable linkをatomicに記録します。同じbindingの再試行は同ownerを返しactivation epochを更新しません。異なるbindingや終了・terminal交代済みcontinuationは拒否します。通常role timeoutは維持され、`workflow supervise NEW_ID` による監視が必要です。agent、observer、dispatcher、supervisorを起動せず、失敗時もterminalへの入力・closeを行いません。
+
+apply時だけoptional `workflow_continuations` tableを追加します。canonical v7 schema定義と `PRAGMA user_version=7` は不変です。旧v7 reader、queue caller、dispatcherはextra objectを許容するためupgrade/restartなしで同DBを利用できます。linkはsource/continuation、session、terminal incarnation、process start identityを保持し、statusで参照できます。workflow dependencyやartifactではなく、observation event削除の対象にもなりません。Orca metadataはbinding後に更新します。metadata失敗時は作成済みowner IDを含むJSONとexit 2を返します。ownerを確認して同じbindingを再試行し、別actorを起動しないでください。
+
+terminal worktreeと実checkのcwdは別です。採用対象は元terminalのworktreeだけです。別checkoutのcheckには明示的なexecutable wrapperを使用します。現在の実行pathと運用証拠はlocal objective fileに保持し、public exampleへ私有project pathを載せないでください。

@@ -1491,6 +1491,33 @@ def handle(args: argparse.Namespace) -> int:
     config = _config(args)
     if args.workflow_command == "start":
         return _cmd_start(args)
+    if args.workflow_command == "continue-timeout":
+        store = WorkflowStore(config.state_dir)
+        client = _adapter(config)
+        result = WorkflowService(store).continue_timeout(
+            args.workflow_id,
+            client,
+            terminal=args.terminal,
+            session=args.codex_session,
+            agent_pid=args.agent_pid,
+            expected_head=args.expected_head,
+            name=args.name,
+            apply=args.apply,
+            objective=_read_objective_file(args.objective_file)
+            if args.objective_file
+            else args.objective,
+        )
+        if args.apply:
+            owner = store.get(str(result["workflow_id"]))
+            try:
+                client.set_lifecycle(owner.adapter_reference, WorkflowStatus.RUNNING)
+                result["metadata_updated"] = True
+            except (OSError, RuntimeError, ValueError) as exc:
+                result["metadata_updated"] = False
+                result["metadata_error"] = str(exc)
+            result["workflow"] = asdict(owner)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("metadata_updated", True) else 2
     read_only = args.workflow_command in {"list", "status"}
     # The durable supervisor owns its own retry policy. Let it observe and
     # persist transient Orca failures instead of bypassing that policy here.
@@ -1547,6 +1574,7 @@ def handle(args: argparse.Namespace) -> int:
                     "run": run,
                     "blocker": blocker,
                     "single_report": BatchStore(config.state_dir).single_report(workflow.id),
+                    "continuation": store.continuation(workflow.id),
                     "owner_agent_state": _owner_terminal_state(workflow, client),
                     "prompt_delivery": {
                         "transport": "existing_pty",

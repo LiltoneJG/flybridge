@@ -120,6 +120,30 @@ class WorkflowRuntime(Protocol):
         model: str | None = None,
     ) -> str: ...
 
+    def inspect_timeout_continuation(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        old_terminal: str,
+        terminal: str,
+        session: str,
+        agent_pid: int,
+    ) -> dict[str, str]: ...
+
+    def verify_timeout_continuation_local(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        old_terminal: str,
+        terminal: str,
+        session: str,
+        agent_pid: int,
+        repository: str,
+        runtime_id: str,
+        expected_head: str,
+        proof: dict[str, str],
+    ) -> None: ...
+
     def validate_codex_resume(
         self, agent: str, session_id: str, *, model: str | None = None
     ) -> None: ...

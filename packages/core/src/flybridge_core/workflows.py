@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
@@ -60,6 +61,19 @@ _WORKFLOW_FROM = (
     "workflows LEFT JOIN workflow_worktree_ownership AS worktree_ownership "
     "ON worktree_ownership.workflow_id = workflows.id"
 )
+# Explicit optional extension. Version-7 readers validate canonical definitions
+# and tolerate additional objects; do not change the shared schema version.
+_CONTINUATION_SCHEMA = """CREATE TABLE workflow_continuations (
+    source_id TEXT PRIMARY KEY REFERENCES workflows(id),
+    workflow_id TEXT NOT NULL UNIQUE REFERENCES workflows(id),
+    session_id TEXT NOT NULL,
+    terminal_handle TEXT NOT NULL,
+    incarnation_id TEXT NOT NULL,
+    agent_pid INTEGER NOT NULL,
+    process_started TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)"""
+
 SCHEMA_VERSION = DATABASE_SCHEMA_VERSION
 _INSERT_ORCHESTRATION_RUN = """
     INSERT INTO orchestration_runs(
@@ -2571,6 +2585,210 @@ class WorkflowStore:
                 (cutoff,),
             ).fetchall()
         return [self._record(row) for row in rows]
+
+    def continue_timeout(
+        self,
+        source_id: str,
+        *,
+        terminal: str,
+        session: str,
+        proof: dict[str, str],
+        agent_pid: int,
+        name: str,
+        objective: str,
+        start_sha: str,
+        expected_source: WorkflowRecord,
+        verify: Callable[[], None],
+        apply: bool,
+    ) -> dict[str, object]:
+        """Bind an independent single owner without rewriting the timeout history."""
+        if not name.strip() or not objective.strip() or not terminal or agent_pid <= 0:
+            raise ValueError("continuation requires a name, terminal and positive agent PID")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT {_WORKFLOW_SELECT} FROM {_WORKFLOW_FROM} WHERE id = ?", (source_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("workflow was not found")
+            source = self._record(row)
+            if source != expected_source:
+                raise ValueError("source workflow changed during continuation inspection")
+            if (
+                source.mode != WorkflowMode.SINGLE
+                or source.status != WorkflowStatus.CANCELLED
+                or source.error != "role-timeout"
+                or source.cleanup_error
+                or source.external_reconciled_at is None
+                or not source.adapter_reference
+                or not source.worktree_path
+                or not source.terminal_handle
+            ):
+                raise ValueError("only a cleaned, reconciled timeout-cancelled single can continue")
+            if terminal == source.terminal_handle:
+                raise ValueError("continuation must use a different, already resumed terminal")
+            if connection.execute(
+                "SELECT 1 FROM workflow_lifecycle_operations WHERE workflow_id=?", (source_id,)
+            ).fetchone():
+                raise ValueError("source lifecycle operation is unresolved")
+            busy = connection.execute(
+                "SELECT 1 FROM queue_requests q LEFT JOIN queue_jobs j ON j.request_id=q.id "
+                "LEFT JOIN queue_result_notifications n ON n.request_id=q.id "
+                "LEFT JOIN queue_resource_blocks b ON b.request_id=q.id "
+                "WHERE q.owner=? AND (q.status IN ('waiting','leased') "
+                "OR j.status = 'running' "
+                "OR (n.request_id IS NOT NULL AND n.acknowledged_at IS NULL) "
+                "OR b.request_id IS NOT NULL)",
+                (source_id,),
+            ).fetchone()
+            if busy:
+                raise ValueError("source resources or results require explicit recovery")
+            removal = connection.execute(
+                "SELECT state FROM retained_worktrees WHERE adapter_reference=?",
+                (source.adapter_reference,),
+            ).fetchone()
+            if removal and removal["state"] != "retained":
+                raise ValueError("checkout deletion is unresolved or complete")
+            extension = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_continuations'"
+            ).fetchone()
+            if extension and " ".join(extension["sql"].split()) != " ".join(
+                _CONTINUATION_SCHEMA.split()
+            ):
+                raise ValueError("continuation extension definition differs")
+            prior = (
+                connection.execute(
+                    "SELECT * FROM workflow_continuations WHERE source_id=?", (source_id,)
+                ).fetchone()
+                if extension
+                else None
+            )
+            if prior:
+                if (
+                    prior["session_id"],
+                    prior["terminal_handle"],
+                    prior["incarnation_id"],
+                    prior["agent_pid"],
+                    prior["process_started"],
+                ) != (
+                    session,
+                    terminal,
+                    proof["incarnation_id"],
+                    agent_pid,
+                    proof["process_started"],
+                ):
+                    raise ValueError("source already has a different continuation")
+                current = connection.execute(
+                    "SELECT status, terminal_handle FROM workflows WHERE id=?",
+                    (prior["workflow_id"],),
+                ).fetchone()
+                if current["status"] != "running" or current["terminal_handle"] != terminal:
+                    raise ValueError("continuation is no longer the running terminal owner")
+                verify()
+                return {
+                    "workflow_id": prior["workflow_id"],
+                    "source_id": source_id,
+                    "dry_run": not apply,
+                    "already_bound": True,
+                }
+            conflict = connection.execute(
+                "SELECT 1 FROM workflows w LEFT JOIN owned_terminals t ON t.workflow_id=w.id "
+                "WHERE w.external_reconciled_at IS NULL AND "
+                "(w.adapter_reference=? OR w.terminal_handle=? OR t.handle=?)",
+                (source.adapter_reference, terminal, terminal),
+            ).fetchone()
+            duplicate = connection.execute(
+                "SELECT 1 FROM workflows WHERE name=? AND status IN ('requested','starting','running')",
+                (name,),
+            ).fetchone()
+            if conflict or duplicate:
+                raise ValueError("continuation name, worktree or terminal already has an owner")
+            verify()
+            if not apply:
+                return {
+                    "source_id": source_id,
+                    "dry_run": True,
+                    "eligible": True,
+                    "terminal_handle": terminal,
+                    "proof": proof,
+                }
+            if not extension:
+                connection.execute(_CONTINUATION_SCHEMA)
+            now = _now()
+            workflow_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO workflows(id, repository, mode, name, objective, role, status, "
+                "adapter_reference, worktree_path, terminal_handle, implementation_repository, "
+                "runtime_repository_id, start_sha, activated_at, created_at, updated_at, issue_url) "
+                "VALUES (?, ?, 'single', ?, ?, 'single', 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    workflow_id,
+                    source.repository,
+                    name,
+                    objective.strip(),
+                    source.adapter_reference,
+                    source.worktree_path,
+                    terminal,
+                    source.implementation_repository,
+                    source.runtime_repository_id,
+                    start_sha,
+                    now,
+                    now,
+                    now,
+                    None,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO workflow_worktree_ownership VALUES (?, 0)", (workflow_id,)
+            )
+            connection.execute(
+                "INSERT INTO owned_terminals VALUES (?, ?, 'agent', ?)",
+                (workflow_id, terminal, now),
+            )
+            connection.execute(
+                "INSERT INTO worktrees(orca_id,path,ownership,presence) VALUES (?,?,'managed','present') "
+                "ON CONFLICT(orca_id) DO UPDATE SET ownership='managed',presence='present'",
+                (source.adapter_reference, source.worktree_path),
+            )
+            connection.execute(
+                "INSERT INTO step_worktrees VALUES (?, ?, 'primary')",
+                (workflow_id, source.adapter_reference),
+            )
+            connection.execute(
+                "INSERT INTO agent_runs VALUES (?, ?, 'codex', NULL, ?, 'running', ?, NULL)",
+                (str(uuid.uuid4()), workflow_id, terminal, now),
+            )
+            connection.execute(
+                "INSERT INTO workflow_continuations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source_id,
+                    workflow_id,
+                    session,
+                    terminal,
+                    proof["incarnation_id"],
+                    agent_pid,
+                    proof["process_started"],
+                    now,
+                ),
+            )
+        return {
+            "source_id": source_id,
+            "workflow_id": workflow_id,
+            "dry_run": False,
+            "already_bound": False,
+        }
+
+    def continuation(self, workflow_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_continuations'"
+            ).fetchone():
+                return None
+            row = connection.execute(
+                "SELECT * FROM workflow_continuations WHERE source_id=? OR workflow_id=?",
+                (workflow_id, workflow_id),
+            ).fetchone()
+        return dict(row) if row else None
 
     def retain_worktree(self, workflow_id: str) -> None:
         """Record a preserved checkout independently of released agent ownership."""

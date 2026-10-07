@@ -21,6 +21,7 @@ from flybridge_core import (
     merge_lifecycle_comment,
 )
 
+from .continuation import inspect_process
 from .resolve import (
     UnresolvedAgentError,
     resolve_codex_resume_command,
@@ -1211,6 +1212,139 @@ class OrcaClient:
             and isinstance(terminal.get("handle"), str)
         ]
         return str(matches[0]["handle"]) if len(matches) == 1 else None
+
+    def inspect_timeout_continuation(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        old_terminal: str,
+        terminal: str,
+        session: str,
+        agent_pid: int,
+    ) -> dict[str, str]:
+        """Read bounded local actor evidence; never write to any PTY."""
+        if sys.platform != "linux" or any(
+            os.environ.get(key) for key in ("ORCA_ENVIRONMENT", "ORCA_PAIRING_CODE")
+        ):
+            raise OrcaError("timeout adoption requires local Linux process evidence")
+        try:
+            previous = self._json(["terminal", "show", "--terminal", old_terminal], timeout=25)
+        except OrcaError as exc:
+            if not self._is_missing_selector(exc):
+                raise
+        else:
+            old = self._required_object(previous, "terminal")
+            if (
+                old.get("handle") != old_terminal
+                or old.get("worktreeId") != worktree_id
+                or old.get("executionHostId") != "local"
+                or old.get("connected") is not False
+                or old.get("writable") is not False
+            ):
+                raise OrcaError("previous terminal is still live or uncertain")
+        current = self._json(["terminal", "show", "--terminal", terminal], timeout=25)
+        actor = self._required_object(current, "terminal")
+        if (
+            actor.get("handle") != terminal
+            or actor.get("worktreeId") != worktree_id
+            or actor.get("worktreePath") != worktree_path
+            or actor.get("executionHostId") != "local"
+            or actor.get("connected") is not True
+            or actor.get("writable") is not True
+            or actor.get("orphaned") is not False
+            or actor.get("agentIdentity") != "codex"
+            or not isinstance(actor.get("incarnationId"), str)
+            or not actor.get("incarnationId")
+        ):
+            raise OrcaError("continuation terminal identity is incomplete or mismatched")
+        idle = self._json(
+            [
+                "terminal",
+                "wait",
+                "--terminal",
+                terminal,
+                "--for",
+                "tui-idle",
+                "--timeout-ms",
+                "1000",
+            ],
+            timeout=25,
+        )
+        if self._signal(idle, "wait", "satisfied") is not True:
+            raise OrcaError("continuation actor is busy or idle state is unknown")
+        try:
+            started = inspect_process(
+                worktree_id, worktree_path, old_terminal, terminal, session, agent_pid
+            )
+        except (OSError, ValueError, IndexError, UnicodeError) as exc:
+            raise OrcaError("continuation process inspection is incomplete or mismatched") from exc
+        after = self._json(["terminal", "show", "--terminal", terminal], timeout=25)
+        latest = self._required_object(after, "terminal")
+        identity = (
+            "handle",
+            "worktreeId",
+            "worktreePath",
+            "executionHostId",
+            "connected",
+            "writable",
+            "orphaned",
+            "agentIdentity",
+            "incarnationId",
+            "ptyId",
+        )
+        if any(latest.get(key) != actor.get(key) for key in identity):
+            raise OrcaError("continuation terminal changed during inspection")
+        return {"incarnation_id": str(actor["incarnationId"]), "process_started": started}
+
+    def verify_timeout_continuation_local(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        old_terminal: str,
+        terminal: str,
+        session: str,
+        agent_pid: int,
+        repository: str,
+        runtime_id: str,
+        expected_head: str,
+        proof: dict[str, str],
+    ) -> None:
+        """Final bounded local proof only: no Orca RPC while holding the database lock."""
+        from time import monotonic
+
+        deadline = monotonic() + 3
+        try:
+            if self._repository_id(worktree_id) != runtime_id:
+                raise ValueError("runtime repository differs")
+            commands = (
+                ("remote", "get-url", "origin"),
+                ("rev-parse", "--verify", "HEAD"),
+                ("rev-parse", "--show-toplevel"),
+                ("status", "--porcelain"),
+            )
+            results = []
+            for arguments in commands:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise ValueError("local verification deadline exceeded")
+                result = self._run(["git", "-C", worktree_path, *arguments], timeout=remaining)
+                if result.returncode:
+                    raise ValueError("local checkout cannot be verified")
+                results.append(result.stdout.strip())
+            if (
+                self._github_repository(results[0]) != repository
+                or results[1] != expected_head
+                or Path(results[2]).resolve() != Path(worktree_path).resolve()
+                or results[3]
+                or inspect_process(
+                    worktree_id, worktree_path, old_terminal, terminal, session, agent_pid
+                )
+                != proof["process_started"]
+                or monotonic() > deadline
+            ):
+                raise ValueError("local checkout/process identity changed")
+        except (OSError, ValueError, IndexError, UnicodeError, subprocess.TimeoutExpired) as exc:
+            raise OrcaError("continuation final local verification failed") from exc
 
     def validate_codex_resume(
         self, agent: str, session_id: str, *, model: str | None = None
