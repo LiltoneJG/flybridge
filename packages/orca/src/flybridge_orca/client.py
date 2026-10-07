@@ -1227,21 +1227,22 @@ class OrcaClient:
             os.environ.get(key) for key in ("ORCA_ENVIRONMENT", "ORCA_PAIRING_CODE")
         ):
             raise OrcaError("timeout adoption requires local Linux process evidence")
-        try:
-            previous = self._json(["terminal", "show", "--terminal", old_terminal], timeout=25)
-        except OrcaError as exc:
-            if not self._is_missing_selector(exc):
-                raise
-        else:
-            old = self._required_object(previous, "terminal")
-            if (
-                old.get("handle") != old_terminal
-                or old.get("worktreeId") != worktree_id
-                or old.get("executionHostId") != "local"
-                or old.get("connected") is not False
-                or old.get("writable") is not False
-            ):
-                raise OrcaError("previous terminal is still live or uncertain")
+        if old_terminal != terminal:
+            try:
+                previous = self._json(["terminal", "show", "--terminal", old_terminal], timeout=25)
+            except OrcaError as exc:
+                if not self._is_missing_selector(exc):
+                    raise
+            else:
+                old = self._required_object(previous, "terminal")
+                if (
+                    old.get("handle") != old_terminal
+                    or old.get("worktreeId") != worktree_id
+                    or old.get("executionHostId") != "local"
+                    or old.get("connected") is not False
+                    or old.get("writable") is not False
+                ):
+                    raise OrcaError("previous terminal is still live or uncertain")
         current = self._json(["terminal", "show", "--terminal", terminal], timeout=25)
         actor = self._required_object(current, "terminal")
         if (

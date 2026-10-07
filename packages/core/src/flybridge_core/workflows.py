@@ -2601,7 +2601,7 @@ class WorkflowStore:
         verify: Callable[[], None],
         apply: bool,
     ) -> dict[str, object]:
-        """Bind an independent single owner without rewriting the timeout history."""
+        """Bind an independent single owner, chaining a timed-out owner without rewriting history."""
         if not name.strip() or not objective.strip() or not terminal or agent_pid <= 0:
             raise ValueError("continuation requires a name, terminal and positive agent PID")
         with self._connect() as connection:
@@ -2625,8 +2625,41 @@ class WorkflowStore:
                 or not source.terminal_handle
             ):
                 raise ValueError("only a cleaned, reconciled timeout-cancelled single can continue")
-            if terminal == source.terminal_handle:
-                raise ValueError("continuation must use a different, already resumed terminal")
+            extension = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_continuations'"
+            ).fetchone()
+            if extension and " ".join(extension["sql"].split()) != " ".join(
+                _CONTINUATION_SCHEMA.split()
+            ):
+                raise ValueError("continuation extension definition differs")
+            incoming = (
+                connection.execute(
+                    "SELECT session_id, terminal_handle, incarnation_id, agent_pid, process_started "
+                    "FROM workflow_continuations WHERE workflow_id=?",
+                    (source_id,),
+                ).fetchone()
+                if extension
+                else None
+            )
+            if incoming:
+                if (
+                    incoming["session_id"],
+                    incoming["terminal_handle"],
+                    incoming["incarnation_id"],
+                    incoming["agent_pid"],
+                    incoming["process_started"],
+                ) != (
+                    session,
+                    terminal,
+                    proof["incarnation_id"],
+                    agent_pid,
+                    proof["process_started"],
+                ) or terminal != source.terminal_handle:
+                    raise ValueError("repeat continuation must preserve its exact actor identity")
+            elif terminal == source.terminal_handle:
+                raise ValueError(
+                    "first continuation must use a different, already resumed terminal"
+                )
             if connection.execute(
                 "SELECT 1 FROM workflow_lifecycle_operations WHERE workflow_id=?", (source_id,)
             ).fetchone():
@@ -2649,13 +2682,6 @@ class WorkflowStore:
             ).fetchone()
             if removal and removal["state"] != "retained":
                 raise ValueError("checkout deletion is unresolved or complete")
-            extension = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_continuations'"
-            ).fetchone()
-            if extension and " ".join(extension["sql"].split()) != " ".join(
-                _CONTINUATION_SCHEMA.split()
-            ):
-                raise ValueError("continuation extension definition differs")
             prior = (
                 connection.execute(
                     "SELECT * FROM workflow_continuations WHERE source_id=?", (source_id,)
@@ -2785,8 +2811,9 @@ class WorkflowStore:
             ).fetchone():
                 return None
             row = connection.execute(
-                "SELECT * FROM workflow_continuations WHERE source_id=? OR workflow_id=?",
-                (workflow_id, workflow_id),
+                "SELECT * FROM workflow_continuations WHERE source_id=? OR workflow_id=? "
+                "ORDER BY CASE WHEN source_id=? THEN 0 ELSE 1 END LIMIT 1",
+                (workflow_id, workflow_id, workflow_id),
             ).fetchone()
         return dict(row) if row else None
 

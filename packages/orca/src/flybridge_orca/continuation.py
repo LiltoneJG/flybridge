@@ -54,7 +54,7 @@ def inspect_process(
             # A disappearing process is rechecked by the caller; the target must survive.
             continue
         handle = environment.get(b"ORCA_TERMINAL_HANDLE", b"").decode()
-        if handle == old_terminal and fields[0] != "Z":
+        if old_terminal != terminal and handle == old_terminal and fields[0] != "Z":
             raise ValueError("previous actor process is still alive")
         if session in argv:
             matches.append(int(directory.name))

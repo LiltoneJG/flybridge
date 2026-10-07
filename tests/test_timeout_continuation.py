@@ -42,6 +42,7 @@ def setup(tmp_path):
         fail = False
         inspections = 0
         changed = False
+        old_terminal = "old"
 
         def verify_worktree(self, *args):
             assert args == ("repo::checkout", str(tmp_path))
@@ -56,7 +57,7 @@ def setup(tmp_path):
             return ()
 
         def inspect_timeout_continuation(self, *args):
-            assert args == ("repo::checkout", str(tmp_path), "old", "new", SESSION, 123)
+            assert args == ("repo::checkout", str(tmp_path), self.old_terminal, "new", SESSION, 123)
             self.inspections += 1
             if self.fail:
                 raise OrcaError("busy or identity mismatch")
@@ -661,3 +662,127 @@ def test_unrelated_process_stat_disappearance_only_is_skipped(tmp_path, monkeypa
     else:
         with pytest.raises(PermissionError):
             inspect_process("repo::checkout", str(tmp_path), "old", "new", SESSION, 123, proc=proc)
+
+
+def timeout_existing_owner(store, workflow_id):
+    store.transition(workflow_id, "cancelled", error="role-timeout")
+    store.mark_external_reconciled(workflow_id)
+
+
+def test_repeat_timeout_chains_same_actor_and_preserves_each_prior_record(setup, tmp_path):
+    store, source, runtime, adopt = setup
+    first = adopt(apply=True)
+    first_owner_id = first["workflow_id"]
+    first_owner = store.get(first_owner_id)
+    source_before = store.get(source)
+    first_link = store.continuation(source)
+    timeout_existing_owner(store, first_owner_id)
+    first_cancelled = store.get(first_owner_id)
+    runtime.old_terminal = "new"
+    second = WorkflowService(store).continue_timeout(
+        first_owner_id,
+        runtime,
+        terminal="new",
+        session=SESSION,
+        agent_pid=123,
+        objective="Next bounded continuation scope",
+        expected_head=HEAD,
+        apply=True,
+    )
+    second_owner = store.get(second["workflow_id"])
+    assert second_owner.id != first_owner_id
+    assert second_owner.status == "running" and second_owner.terminal_handle == "new"
+    assert second_owner.start_sha == HEAD
+    assert store.get(source) == source_before
+    assert store.get(first_owner_id) == first_cancelled
+    assert store.continuation(source) == first_link
+    assert store.continuation(first_owner_id)["workflow_id"] == second_owner.id
+    assert store.continuation(second_owner.id)["source_id"] == first_owner_id
+    assert store.owned_terminal_handles(second_owner.id) == ["new"]
+    assert first_owner.status == "running" and first_owner.terminal_handle == "new"
+
+
+@pytest.mark.parametrize("block", ["changed-proof", "active-fifo"])
+def test_repeat_timeout_rejects_actor_change_or_unresolved_fifo(setup, tmp_path, block):
+    store, _source, runtime, adopt = setup
+    first = adopt(apply=True)
+    owner_id = first["workflow_id"]
+    timeout_existing_owner(store, owner_id)
+    runtime.old_terminal = "new"
+    if block == "changed-proof":
+        runtime.proof = {**PROOF, "process_started": "boot:changed"}
+    else:
+        ResourceQueue(tmp_path / "state").acquire("checks", owner_id)
+    before = store.get(owner_id)
+    count = len(store.list_workflows())
+    with pytest.raises(ValueError):
+        WorkflowService(store).continue_timeout(
+            owner_id,
+            runtime,
+            terminal="new",
+            session=SESSION,
+            agent_pid=123,
+            objective="Next scope",
+            expected_head=HEAD,
+            apply=True,
+        )
+    assert store.get(owner_id) == before
+    assert len(store.list_workflows()) == count
+    with store._connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT 1 FROM workflow_continuations WHERE source_id=?", (owner_id,)
+            ).fetchone()
+            is None
+        )
+
+
+def test_same_terminal_inspection_proves_current_actor_without_old_terminal_check(
+    tmp_path, monkeypatch
+):
+    import flybridge_orca.client as module
+
+    monkeypatch.delenv("ORCA_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("ORCA_PAIRING_CODE", raising=False)
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        result = (
+            {"wait": {"satisfied": True}}
+            if argv[1:3] == ["terminal", "wait"]
+            else {
+                "terminal": {
+                    "handle": "same",
+                    "worktreeId": "repo::checkout",
+                    "worktreePath": str(tmp_path),
+                    "connected": True,
+                    "writable": True,
+                    "orphaned": False,
+                    "agentIdentity": "codex",
+                    "executionHostId": "local",
+                    "incarnationId": "inc",
+                }
+            }
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True, "result": result}), "")
+
+    monkeypatch.setattr(module, "inspect_process", lambda *args: "boot:100")
+    client = OrcaClient("fixture-orca", runner=runner)
+    assert client.inspect_timeout_continuation(
+        "repo::checkout", str(tmp_path), "same", "same", SESSION, 123
+    ) == {"incarnation_id": "inc", "process_started": "boot:100"}
+    assert sum(call[1:5] == ["terminal", "show", "--terminal", "same"] for call in calls) == 2
+    assert all("close" not in call and "send" not in call for call in calls)
+
+
+def test_local_process_identity_accepts_exact_actor_on_same_terminal(tmp_path):
+    proc = tmp_path / "proc"
+    boot = proc / "sys/kernel/random"
+    boot.mkdir(parents=True)
+    (boot / "boot_id").write_text("boot")
+    proc_actor(proc, 123, tmp_path, terminal="same")
+    assert (
+        inspect_process("repo::checkout", str(tmp_path), "same", "same", SESSION, 123, proc=proc)
+        == "boot:100"
+    )
