@@ -4,6 +4,7 @@ import shlex
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from uuid import UUID
 
 from flybridge_core import AgentLaunchPreset, load_agent_launch_presets
 
@@ -130,3 +131,25 @@ def agent_cli_is_resolvable(
     if Path(executable).is_absolute():
         return True
     return which(executable) is not None
+
+
+def resolve_codex_resume_command(
+    agent: str,
+    session_id: str,
+    prompt: str,
+    *,
+    model: str | None = None,
+    presets: dict[str, AgentLaunchPreset] | None = None,
+    which: Which = shutil.which,
+) -> str:
+    """Resume one explicit Codex session via argv, never --last or PTY input."""
+    try:
+        session = str(UUID(session_id))
+    except ValueError as exc:
+        raise UnresolvedAgentError("Codex resume requires an explicit session UUID") from exc
+    if Path(agent).name != "codex":
+        raise UnresolvedAgentError("session resume is available only for Codex")
+    command = shlex.split(resolve_launch_command(agent, model, presets=presets, which=which))
+    if len(command) < 2 or command[1] != "exec":
+        raise UnresolvedAgentError("Codex session resume requires an exec launch preset")
+    return shlex.join([command[0], "exec", "resume", *command[2:], session, prompt])

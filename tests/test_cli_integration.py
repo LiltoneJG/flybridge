@@ -67,6 +67,10 @@ def _install_orca(monkeypatch, client_cls) -> None:
         client_cls.create_coordinator = lambda self, *_args, **_kwargs: "terminal:coordinator"
     if getattr(client_cls, "terminal_is_valid", None) is None:
         client_cls.terminal_is_valid = lambda self, *_args, **_kwargs: True
+    if getattr(client_cls, "agent_owner_state", None) is None:
+        client_cls.agent_owner_state = lambda self, reference, handle: (
+            "valid" if self.terminal_is_valid(reference, handle) else "invalid"
+        )
     if getattr(client_cls, "verify_worktree", None) is None:
         client_cls.verify_worktree = lambda self, *_args, **_kwargs: None
     if getattr(client_cls, "push_fast_forward", None) is None:
@@ -247,7 +251,7 @@ def test_explicit_cleanup_reconciles_only_stale_owned_workflows(tmp_path: Path) 
 
     assert [workflow.id for workflow in reconciled] == [running.id]
     assert closed == ["repo::/tmp/worktree"]
-    assert removed == ["repo::/tmp/worktree"]
+    assert removed == []
     assert service.store.get(running.id).status == "cancelled"
 
 
@@ -2698,8 +2702,8 @@ def test_workflow_resume_reuses_persisted_terminal_without_creating_worktree(
     assert json.loads(capsys.readouterr().out)["workflow"]["status"] == "running"
     assert calls[0] == ("repo::/tmp/existing", "/tmp/existing")
     assert calls[1] == ("repo::/tmp/existing", "agent-existing")
-    assert calls[2] == ("wait", "agent-existing")
-    assert calls[3][0] == "agent-existing"
+    assert all(call[0] != "wait" for call in calls)
+    assert calls[2][0] == "agent-existing"
 
 
 def test_workflow_resume_enables_the_configured_queue_observer(
@@ -2884,7 +2888,7 @@ def test_cleanup_apply_reconciles_stale_running_workflow(
     output = json.loads(capsys.readouterr().out)
     assert output["reconciled_count"] == 1
     assert output["workflow_ids"] == [workflow.id]
-    assert removed == ["repo::/tmp/stale"]
+    assert removed == []
     assert store.get(workflow.id).status == "cancelled"
 
 
@@ -4056,8 +4060,9 @@ def test_cleanup_apply_reports_per_workflow_errors(tmp_path: Path, capsys, monke
         def __init__(self, _executable: str) -> None:
             pass
 
-        def close_terminals(self, *_args) -> None:
-            return None
+        def close_terminals(self, worktree_id, *_args) -> None:
+            if worktree_id.endswith("one"):
+                raise RuntimeError("Orca unavailable")
 
         def remove_worktree(self, worktree_id: str) -> dict[str, bool]:
             if worktree_id.endswith("one"):
@@ -4600,6 +4605,8 @@ def test_autonomous_coordinator_requires_a_new_commit_in_the_second_review_cycle
     assert root.supervise()["action"] == "returned-to-worker"
     assert "Reviewer feedback artifact:" in root.prompts[-1]
     assert service.store.get(worker.id).start_sha == "sha-1"
+    assert root.removed == []
+    assert len(service.store.retained_worktrees(reviewer.id)) == 1
 
     root.ready(worker.id, "verification", "Nothing changed.", "Review the fix.", expected=2)
     with pytest.raises(ValueError, match="readiness was not found"):
@@ -4647,8 +4654,8 @@ def test_supervisor_flushes_its_outcome_before_closing_its_own_terminal(
     assert worker.external_reconciled_at is not None
     assert reviewer.external_reconciled_at is not None
     assert service.store.get(root.manager_id).external_reconciled_at is None
-    assert any("worker" in item for item in root.removed)
-    assert any("reviewer" in item for item in root.removed)
+    assert root.removed == []
+    assert len(service.store.retained_worktrees()) == 2
 
 
 def test_supervisor_fails_the_run_instead_of_polling_a_dead_role(

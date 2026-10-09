@@ -98,9 +98,14 @@ class ResourceQueue:
             raise ValueError("resource and owner are required")
         resource = resource.strip()
         owner = owner.strip()
-        now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = _now()
+            finishing = connection.execute(
+                "SELECT 1 FROM workflow_lifecycle_operations WHERE workflow_id = ?", (owner,)
+            ).fetchone()
+            if finishing is not None:
+                raise ValueError("queue owner has a lifecycle operation in progress")
             existing = connection.execute(
                 """
                 SELECT id, status, created_at FROM queue_requests
@@ -470,6 +475,10 @@ class ResourceQueue:
     def claim_job(self, request_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM queue_dispatcher_control WHERE singleton=1 AND paused=1"
+            ).fetchone():
+                return None
             row = connection.execute(
                 "SELECT j.*, q.resource, q.owner FROM queue_jobs j "
                 "JOIN queue_requests q ON q.id=j.request_id "

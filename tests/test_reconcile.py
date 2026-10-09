@@ -32,6 +32,33 @@ def test_reconcile_registers_unmanaged_and_is_idempotent(tmp_path: Path) -> None
         )
 
 
+def test_retained_prior_attempt_is_not_reclaimed_by_its_old_marker(tmp_path: Path) -> None:
+    workflows = WorkflowStore(tmp_path)
+    step = workflows.reserve_root_plan(tmp_path, "single", "retry", "Continue.")[0]
+    comment = merge_workflow_marker("", step.run_id, step.id)
+    workflows.record_retained_worktree(
+        step.id,
+        "old-checkout",
+        "/tmp/old-checkout",
+        "baseline",
+        owns_worktree=True,
+    )
+    reconcile = ReconcileStore(tmp_path)
+    observed = reconcile.apply_orca_scan(
+        (_listed("old-checkout", "/tmp/old-checkout", comment),),
+        truncated=False,
+    )
+    assert observed.attached_steps == ()
+    assert workflows.get(step.id).adapter_reference is None
+    assert workflows.retained_worktrees(step.id)[0]["state"] == "retained"
+    recovered = reconcile.apply_orca_scan(
+        (_listed("new-checkout", "/tmp/new-checkout", comment),),
+        truncated=False,
+    )
+    assert recovered.attached_steps == (step.id,)
+    assert workflows.get(step.id).adapter_reference == "new-checkout"
+
+
 def test_dry_run_observes_git_without_persisting_it(tmp_path: Path, monkeypatch) -> None:
     worktree = _listed("outside", "/tmp/outside")
 

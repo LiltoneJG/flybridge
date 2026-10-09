@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from uuid import UUID
 
 from flybridge_core import (
     AdapterReferenceConflict,
@@ -267,7 +268,6 @@ class WorkflowService:
                 raise ValueError("only a requested workflow can be started")
             self.store.begin_start(workflow.id, allow_duplicate=allow_duplicate)
         external = None
-        external_attached = False
         try:
             external = create_external()
             adapter_reference = str(getattr(external, "worktree_id", ""))
@@ -292,7 +292,6 @@ class WorkflowService:
                 start_sha=start_sha,
                 runtime_repository_id=runtime_repository_id,
             )
-            external_attached = True
             activation_reference = self.store.claim_activation(workflow.id)
             try:
                 activate_external(activation_reference)
@@ -341,19 +340,19 @@ class WorkflowService:
                         cleanup_external(cleanup_reference, handle)
                     except (OSError, RuntimeError) as cleanup_exc:
                         cleanup_errors.append(f"terminal {handle}: {cleanup_exc}")
-                if (
-                    remove_external
-                    and not ownership_conflict
-                    and bool(getattr(external, "owns_worktree", True))
-                    and not external_attached
-                    and not cleanup_errors
-                ):
-                    try:
-                        remove_external(cleanup_reference)
-                        if current.adapter_reference:
-                            self.store.mark_external_reconciled(current.id)
-                    except (OSError, RuntimeError) as cleanup_exc:
-                        cleanup_errors.append(f"worktree removal: {cleanup_exc}")
+                # An incomplete start may already contain useful files. Never delete it.
+                if not ownership_conflict and orphan_path:
+                    self.store.record_retained_worktree(
+                        current.id,
+                        cleanup_reference,
+                        orphan_path,
+                        current.start_sha,
+                        owns_worktree=bool(getattr(external, "owns_worktree", True)),
+                    )
+                if not ownership_conflict and current.adapter_reference:
+                    self.store.retain_worktree(current.id)
+                    if not cleanup_errors and handles:
+                        self.store.mark_external_reconciled(current.id)
             cleanup_error = "".join(f"; {error}" for error in cleanup_errors)
             current = self.store.get(workflow.id)
             if current.status == WorkflowStatus.STARTING:
@@ -622,7 +621,7 @@ class WorkflowService:
                 worktree_id, WorkflowStatus.RUNNING, issue_urls=issue_urls
             ),
             runtime.close_terminals,
-            runtime.remove_worktree,
+            None,
             identify_external,
             allow_duplicate=allow_duplicate,
             already_starting=already_starting,
@@ -651,6 +650,9 @@ class WorkflowService:
         observer_command: str | None = None,
         observer_enabled: bool | None = None,
         model: str | None = None,
+        codex_session_id: str | None = None,
+        previous_agent_stopped: bool = False,
+        followup: str | None = None,
     ) -> WorkflowRecord:
         """Resume a persisted running workflow in its exact owned Orca worktree."""
         workflow = self.store.get(workflow_id)
@@ -658,6 +660,19 @@ class WorkflowService:
             raise ValueError("only a running workflow can be resumed")
         if not workflow.adapter_reference or not workflow.worktree_path:
             raise ValueError("running workflow has incomplete persisted worktree ownership")
+        if codex_session_id is not None:
+            try:
+                codex_session_id = str(UUID(codex_session_id))
+            except ValueError as exc:
+                raise ValueError("Codex resume requires an explicit session UUID") from exc
+            if Path(agent).name != "codex":
+                raise ValueError("session resume is available only for Codex")
+        if codex_session_id is not None and not previous_agent_stopped:
+            raise ValueError("Codex session resume requires --previous-agent-stopped confirmation")
+        if previous_agent_stopped and codex_session_id is None:
+            raise ValueError("--previous-agent-stopped requires --codex-session")
+        if followup and codex_session_id is None:
+            raise ValueError("--prompt requires --codex-session")
         manager_plan, worker_verification, review_feedback = self._artifact_prompt_context(workflow)
         review_source_urls = (
             self.store.registered_source_urls(workflow.run_id)
@@ -681,8 +696,33 @@ class WorkflowService:
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        if codex_session_id is not None:
+            preflight = getattr(runtime, "validate_codex_resume", None)
+            if callable(preflight):
+                preflight(agent, codex_session_id, model=model)
+            if followup:
+                prompt += "\n\nOperator follow-up:\n" + followup
+            # Invalidate stale reports before a potentially accepted command launch.
+            self.store.mark_resumed(workflow.id)
+            replacement = runtime.create_codex_resume_terminal(
+                workflow.adapter_reference,
+                workflow.worktree_path,
+                agent,
+                codex_session_id,
+                prompt,
+                model=model,
+            )
+            try:
+                self._replace_agent_terminal(workflow, runtime, replacement)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
+                raise
+            self.store.record_agent_run(workflow.id, agent, replacement, model=model)
+            return self._after_resume(workflow.id, runtime, observer_command, observer_enabled)
         terminal_handle = workflow.terminal_handle
         if not runtime.terminal_is_valid(workflow.adapter_reference, terminal_handle):
+            if workflow.mode == WorkflowMode.SINGLE:
+                self.store.mark_resumed(workflow.id)
             replacement = runtime.create_new_agent_terminal(
                 workflow.adapter_reference,
                 workflow.worktree_path,
@@ -695,14 +735,26 @@ class WorkflowService:
             except (OSError, RuntimeError, ValueError, sqlite3.Error):
                 self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
                 raise
-            resumed = self.store.mark_resumed(workflow.id)
+            resumed = (
+                self.store.get(workflow.id)
+                if workflow.mode == WorkflowMode.SINGLE
+                else self.store.mark_resumed(workflow.id)
+            )
             self.store.record_agent_run(resumed.id, agent, replacement, model=model)
             return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
         if not terminal_handle:
             raise ValueError("running workflow has no resumable agent terminal")
-        runtime.wait_for_agent(terminal_handle)
+        preflight = getattr(runtime, "check_prompt_delivery", None)
+        if callable(preflight):
+            preflight(terminal_handle)
+        if workflow.mode == WorkflowMode.SINGLE:
+            self.store.mark_resumed(workflow.id)
         runtime.send_prompt(terminal_handle, prompt)
-        resumed = self.store.mark_resumed(workflow.id)
+        resumed = (
+            self.store.get(workflow.id)
+            if workflow.mode == WorkflowMode.SINGLE
+            else self.store.mark_resumed(workflow.id)
+        )
         self.store.record_agent_run(resumed.id, agent, terminal_handle, model=model)
         return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
 
@@ -766,6 +818,8 @@ class WorkflowService:
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        if workflow.mode == WorkflowMode.SINGLE:
+            self.store.mark_resumed(workflow.id)
         replacement = runtime.create_new_agent_terminal(
             workflow.adapter_reference,
             workflow.worktree_path,
@@ -778,7 +832,11 @@ class WorkflowService:
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
             raise
-        restarted = self.store.mark_resumed(workflow.id)
+        restarted = (
+            self.store.get(workflow.id)
+            if workflow.mode == WorkflowMode.SINGLE
+            else self.store.mark_resumed(workflow.id)
+        )
         if observer_enabled is not None:
             restarted = self.store.set_queue_observer_enabled(restarted.id, observer_enabled)
         self._ensure_observer(restarted.id, runtime, observer_command)
@@ -925,6 +983,7 @@ class WorkflowService:
         error: str | None = None,
         close_external: Callable[[str, str | None], None] | None = None,
         close_resources: bool = True,
+        timeout_snapshot: WorkflowRecord | None = None,
     ) -> WorkflowRecord:
         try:
             target = WorkflowStatus(target)
@@ -939,7 +998,9 @@ class WorkflowService:
         deadline = time.monotonic() + ACTIVATION_WAIT_SECONDS
         while True:
             try:
-                claim = self.store.claim_terminal_transition(workflow_id, target, error=error)
+                claim = self.store.claim_terminal_transition(
+                    workflow_id, target, error=error, timeout_snapshot=timeout_snapshot
+                )
                 break
             except LifecycleOperationConflict as exc:
                 if exc.kind != "activation" or time.monotonic() >= deadline:
@@ -1283,7 +1344,10 @@ class WorkflowService:
                 skip_reason="no_worker_worktree",
                 dry_run=dry_run,
             )
-        if worker.external_reconciled_at is not None:
+        if any(
+            item["adapter_reference"] == worker.adapter_reference and item["state"] == "deleted"
+            for item in self.store.retained_worktrees(worker.id)
+        ):
             return HarvestResult(
                 root.id,
                 "skipped",
@@ -1457,16 +1521,20 @@ class WorkflowService:
         """Record a salvage push. Failures stay on the result instead of disappearing."""
         return self.salvage_progress(workflow_id, runtime)
 
-    def _close_role_resources(
+    def stop_role_resources(
         self,
         workflow: WorkflowRecord,
         runtime: WorkflowRuntime,
         *,
-        remove_worktree: bool,
         extra_handles: tuple[str, ...] = (),
         dry_run: bool,
     ) -> tuple[tuple[str, str], ...]:
         if not workflow.adapter_reference:
+            return ()
+        if any(
+            item["adapter_reference"] == workflow.adapter_reference and item["state"] == "deleted"
+            for item in self.store.retained_worktrees(workflow.id)
+        ):
             return ()
         handles = set(self.store.owned_terminal_handles(workflow.id))
         if workflow.terminal_handle:
@@ -1484,12 +1552,8 @@ class WorkflowService:
                     raise
         if dry_run:
             return tuple(closed)
-        if remove_worktree and workflow.owns_worktree:
-            try:
-                runtime.remove_worktree(workflow.adapter_reference)
-            except (OSError, RuntimeError) as exc:
-                if not self._missing_selector(exc):
-                    raise
+        # Reconciliation releases agent ownership, not the checkout or its Git metadata.
+        self.store.retain_worktree(workflow.id)
         if workflow.external_reconciled_at is None:
             self.store.mark_external_reconciled(workflow.id)
         return tuple(closed)
@@ -1509,18 +1573,11 @@ class WorkflowService:
         harvested = self.harvest(root.id, runtime, dry_run=dry_run)
         children = [child for child in self.store.children(root.id)]
         closed: list[tuple[str, str]] = []
-        removed: list[str] = []
         for child in children:
             if not child.adapter_reference:
                 continue
-            will_remove = child.owns_worktree and child.external_reconciled_at is None
-            closed.extend(
-                self._close_role_resources(
-                    child, runtime, remove_worktree=will_remove, dry_run=dry_run
-                )
-            )
-            if will_remove:
-                removed.append(child.adapter_reference)
+            closed.extend(self.stop_role_resources(child, runtime, dry_run=dry_run))
+            # All child checkouts are retained, even after successful harvest.
         extra = ()
         if keep == "none":
             try:
@@ -1528,30 +1585,80 @@ class WorkflowService:
                 extra = (run.coordinator_handle,) if run.coordinator_handle else ()
             except ValueError:
                 extra = ()
-            will_remove = root.owns_worktree and root.external_reconciled_at is None
             closed.extend(
-                self._close_role_resources(
+                self.stop_role_resources(
                     root,
                     runtime,
-                    remove_worktree=will_remove,
                     extra_handles=extra,
                     dry_run=dry_run,
                 )
             )
-            if will_remove and root.adapter_reference:
-                removed.append(root.adapter_reference)
-        kept: list[str] = []
-        if root.adapter_reference and (keep == "manager" or not root.owns_worktree):
+            # Closing the manager also preserves its checkout.
+        kept: list[str] = [child.adapter_reference for child in children if child.adapter_reference]
+        if root.adapter_reference:
             kept.append(root.adapter_reference)
+        deleted = {
+            item["adapter_reference"]
+            for item in self.store.retained_worktrees()
+            if item["state"] == "deleted"
+        }
+        kept = [reference for reference in kept if reference not in deleted]
         return RetireResult(
             root.id,
             keep,
             harvested,
             tuple(closed),
-            tuple(dict.fromkeys(removed)),
+            (),
             tuple(kept),
             dry_run=dry_run,
         )
+
+    def remove_retained_worktree(
+        self,
+        workflow_id: str,
+        adapter_reference: str,
+        runtime: WorkflowRuntime,
+        *,
+        discard_unpreserved: bool = False,
+    ) -> dict[str, object]:
+        """Explicit removal of one stopped checkout, never an automatic cleanup action."""
+        matches = [
+            item
+            for item in self.store.retained_worktrees(workflow_id)
+            if item["adapter_reference"] == adapter_reference
+        ]
+        if not matches:
+            raise ValueError("retained worktree was not found for this workflow")
+        candidate = matches[0]
+        if candidate["state"] != "retained" or not candidate["owns_worktree"]:
+            raise ValueError(
+                "only a retained owned worktree can be removed; "
+                "failed or interrupted removal requires inspection"
+            )
+        runtime.inspect_worktree_removal(
+            adapter_reference,
+            expected_path=str(candidate["worktree_path"]),
+            expected_start_sha=candidate["start_sha"],
+            discard_unpreserved=discard_unpreserved,
+        )
+        retained = self.store.claim_worktree_removal(workflow_id, adapter_reference)
+        try:
+            result = runtime.remove_worktree(
+                adapter_reference,
+                expected_path=str(retained["worktree_path"]),
+                expected_start_sha=retained["start_sha"],
+                discard_unpreserved=discard_unpreserved,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.store.finish_worktree_removal(adapter_reference, error=str(exc))
+            raise
+        self.store.finish_worktree_removal(adapter_reference)
+        return {
+            "workflow_id": workflow_id,
+            "adapter_reference": adapter_reference,
+            "state": "deleted",
+            "result": result,
+        }
 
     def try_retire_keep_manager(
         self, workflow_id: str, runtime: WorkflowRuntime
@@ -1597,7 +1704,7 @@ class WorkflowService:
         self,
         max_age_seconds: float,
         close_external: Callable[[str, str | None], None],
-        remove_external: Callable[[str], None],
+        remove_external: Callable[[str], None] | None = None,
         *,
         workflow_ids: tuple[str, ...] | None = None,
     ) -> ReconcileResult:
@@ -1658,28 +1765,12 @@ class WorkflowService:
                             close_external(current.adapter_reference, handle)
                         except (OSError, RuntimeError) as exc:
                             cleanup_errors.append(f"{handle}: {exc}")
-                    try:
-                        if current.owns_worktree:
-                            remove_external(current.adapter_reference)
-                    except (OSError, RuntimeError) as exc:
-                        if "selector_not_found" not in str(exc):
-                            detail = (
-                                f"terminal cleanup failed: {'; '.join(cleanup_errors)}; "
-                                if cleanup_errors
-                                else ""
-                            )
-                            self.store.fail_terminal_update(
-                                workflow_id, f"{detail}worktree removal failed: {exc}"
-                            )
-                            detail = (
-                                f"; terminal cleanup failed: {'; '.join(cleanup_errors)}"
-                                if cleanup_errors
-                                else ""
-                            )
-                            reconciliation_errors.append(
-                                f"{workflow_id}: worktree removal failed: {exc}{detail}"
-                            )
-                            continue
+                    if cleanup_errors:
+                        detail = "terminal cleanup failed: " + "; ".join(cleanup_errors)
+                        self.store.fail_terminal_update(workflow_id, detail)
+                        reconciliation_errors.append(f"{workflow_id}: {detail}")
+                        continue
+                    self.store.retain_worktree(current.id)
                     finished, affected_ids = self.store.complete_stale_reconciliation(workflow_id)
                     affected = [self.store.get(affected_id) for affected_id in affected_ids]
                     self._cancel_owned_requests(affected)

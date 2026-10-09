@@ -187,12 +187,17 @@ def _operator_lifecycle(role: WorkflowRole, workflow_id: str, config_path: Path 
         "Report the result or blocker using "
         f"`{_queue_cli(config_path)} workflow single-report {workflow_id or '<workflow-id>'} "
         '--outcome done|blocked --summary "ONE LINE RESULT"`, then stop. '
-        "Do not run this report while a queue request is waiting or leased. "
+        "For progress that is not final, add `--checkpoint`; it does not notify the parent "
+        "or protect against the role timeout. A final report can be updated after continuation. "
+        "An operator should use `workflow resume` before assigning further work so an old "
+        "report is no longer current. "
+        "Do not submit a final report while a queue request is waiting or leased. "
         "Do not run `workflow complete`. "
         "If required input is missing, request it and report the blocker without claiming "
         "readiness or supplying a successor handoff. Waiting on a Flybridge queue resource is "
         "parking: report the request-id and stop until the lease-id arrives. "
-        "A watchdog closes this role after the configured timeout if it is still running."
+        "A watchdog closes an unreported role after the configured timeout; a current final "
+        "report waits for the operator to verify and finish the workflow."
     )
 
 

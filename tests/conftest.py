@@ -68,3 +68,56 @@ def required_config(**overrides: Any) -> dict[str, Any]:
 def write_config(path: Path, **overrides: Any) -> Path:
     path.write_text(json.dumps(required_config(**overrides), indent=2), encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def require_mock_orca_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Unmocked read-only status paths must never reach the installed Orca CLI."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    from flybridge_orca.client import OrcaClient
+
+    original = OrcaClient.__init__
+    real_which = shutil.which
+    real_run = subprocess.run
+    blocked = {"orca", "orca-ide", "orca-dev", "codex", "claude", "gemini"}
+    mock_bin = tmp_path / "mock-agent-bin"
+    mock_bin.mkdir()
+    for name in blocked:
+        executable = mock_bin / name
+        executable.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(mock_bin) + os.pathsep + os.environ.get("PATH", ""))
+    original_popen = subprocess.Popen.__init__
+
+    def guarded_popen(self, args, *positional, **kwargs):
+        executable = args[0] if isinstance(args, (list, tuple)) else args.split()[0]
+        if Path(executable).name in blocked or "orca-linux.AppImage" in str(args):
+            raise AssertionError("test isolation: Orca/agent subprocess launch forbidden")
+        original_popen(self, args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen)
+
+    def unavailable_runner(arguments, **kwargs):
+        if arguments[0] == "git":
+            return real_run(arguments, **kwargs)
+        raise RuntimeError("test isolation: explicit mock Orca runner required")
+
+    def mock_agent_which(name, *args, **kwargs):
+        if name in blocked:
+            return str(mock_bin / name)
+        return real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", mock_agent_which)
+
+    def initialize(self, executable, **kwargs):
+        # The process-group timeout test deliberately launches only this Python.
+        if executable != sys.executable:
+            kwargs.setdefault("runner", unavailable_runner)
+        kwargs.setdefault("which", mock_agent_which)
+        original(self, executable, **kwargs)
+
+    monkeypatch.setattr(OrcaClient, "__init__", initialize)

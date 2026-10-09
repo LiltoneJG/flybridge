@@ -13,6 +13,26 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def single_report_current(connection, workflow_id: str, terminal_handle: str | None) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM single_reports s JOIN workflows w ON w.id = s.workflow_id "
+        "LEFT JOIN single_report_phases p ON p.workflow_id = s.workflow_id "
+        "WHERE s.workflow_id = ? AND s.terminal_handle = ? "
+        "AND s.terminal_handle = w.terminal_handle AND w.status = 'running' "
+        "AND COALESCE(p.final, 1) = 1 "
+        "AND (w.activated_at IS NULL OR s.reported_at >= w.activated_at) "
+        "AND NOT EXISTS (SELECT 1 FROM queue_requests q WHERE q.owner = w.id "
+        "AND q.created_at > s.reported_at) "
+        "AND NOT EXISTS (SELECT 1 FROM queue_requests q WHERE q.owner = w.id "
+        "AND q.status IN ('waiting', 'leased')) "
+        "AND NOT EXISTS (SELECT 1 FROM queue_result_notifications n "
+        "JOIN queue_requests q ON q.id = n.request_id "
+        "WHERE q.owner = w.id AND n.acknowledged_at IS NULL)",
+        (workflow_id, terminal_handle),
+    ).fetchone()
+    return row is not None
+
+
 class BatchStore:
     def __init__(self, state_dir: Path) -> None:
         self.path = prepare_database(state_dir)
@@ -107,7 +127,9 @@ class BatchStore:
             ).fetchone()
         return str(row["id"]) if row is not None else None
 
-    def report_single(self, workflow_id: str, outcome: str, summary: str) -> None:
+    def report_single(
+        self, workflow_id: str, outcome: str, summary: str, *, final: bool = True
+    ) -> None:
         if outcome not in {"done", "blocked"} or not summary.strip():
             raise ValueError("single report requires a done or blocked outcome and summary")
         with self._connect() as connection:
@@ -122,11 +144,17 @@ class BatchStore:
                 or not workflow["terminal_handle"]
             ):
                 raise ValueError("single report requires a running single workflow")
+            finishing = connection.execute(
+                "SELECT 1 FROM workflow_lifecycle_operations WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if finishing is not None:
+                raise ValueError("workflow lifecycle operation is in progress")
             active = connection.execute(
                 "SELECT 1 FROM queue_requests WHERE owner = ? AND status IN ('waiting', 'leased')",
                 (workflow_id,),
             ).fetchone()
-            if active is not None:
+            if final and active is not None:
                 raise ValueError("release or cancel active queue requests before reporting")
             pending_result = connection.execute(
                 "SELECT 1 FROM queue_jobs j JOIN queue_requests q ON q.id=j.request_id "
@@ -134,16 +162,34 @@ class BatchStore:
                 "WHERE q.owner=? AND n.acknowledged_at IS NULL",
                 (workflow_id,),
             ).fetchone()
-            if pending_result is not None:
+            if final and pending_result is not None:
                 raise ValueError("acknowledge queue job results before reporting")
             previous = connection.execute(
-                "SELECT terminal_handle, outcome, summary FROM single_reports WHERE workflow_id = ?",
+                "SELECT s.*, COALESCE(p.final, 1) AS final FROM single_reports s "
+                "LEFT JOIN single_report_phases p USING(workflow_id) WHERE s.workflow_id = ?",
                 (workflow_id,),
             ).fetchone()
-            if previous is not None and previous["terminal_handle"] == workflow["terminal_handle"]:
-                if previous["outcome"] == outcome and previous["summary"] == summary.strip():
+            if (
+                previous is not None
+                and previous["terminal_handle"] == workflow["terminal_handle"]
+                and previous["outcome"] == outcome
+                and previous["summary"] == summary.strip()
+                and bool(previous["final"]) == final
+            ):
+                activation = connection.execute(
+                    "SELECT activated_at FROM workflows WHERE id = ?", (workflow_id,)
+                ).fetchone()[0]
+                fresh_activation = activation is None or previous["reported_at"] >= activation
+                if fresh_activation and (
+                    not final
+                    or single_report_current(connection, workflow_id, workflow["terminal_handle"])
+                ):
                     return
-                raise ValueError("this agent terminal already submitted a different single report")
+            connection.execute(
+                "INSERT INTO single_report_phases VALUES (?, ?) "
+                "ON CONFLICT(workflow_id) DO UPDATE SET final = excluded.final",
+                (workflow_id, int(final)),
+            )
             connection.execute(
                 "INSERT INTO single_reports VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(workflow_id) DO UPDATE SET terminal_handle = excluded.terminal_handle, "
@@ -156,14 +202,28 @@ class BatchStore:
         if not terminal_handle:
             return False
         with self._connect() as connection:
+            return single_report_current(connection, workflow_id, terminal_handle)
+
+    def single_report(self, workflow_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
-                "SELECT 1 FROM single_reports WHERE workflow_id = ? AND terminal_handle = ?",
-                (workflow_id, terminal_handle),
+                "SELECT s.*, COALESCE(p.final, 1) AS final FROM single_reports s "
+                "LEFT JOIN single_report_phases p USING(workflow_id) WHERE s.workflow_id = ?",
+                (workflow_id,),
             ).fetchone()
-        return row is not None
+            if row is None:
+                return None
+            result = dict(row)
+            result["final"] = bool(result["final"])
+            result["current"] = single_report_current(
+                connection, workflow_id, row["terminal_handle"]
+            )
+            return result
 
     def status(self, batch_id: str) -> dict[str, object]:
         with self._connect() as connection:
+            connection.execute("BEGIN")
             batch = connection.execute(
                 "SELECT * FROM batch_runs WHERE id = ?", (batch_id,)
             ).fetchone()
@@ -183,6 +243,12 @@ class BatchStore:
                 """,
                 (batch_id,),
             ).fetchall()
+            current_reports = {
+                row["workflow_id"]: single_report_current(
+                    connection, str(row["workflow_id"]), row["terminal_handle"]
+                )
+                for row in items
+            }
         result: list[dict[str, object]] = []
         for row in items:
             item = dict(row)
@@ -196,7 +262,7 @@ class BatchStore:
                 )
             elif item["workflow_status"] in {"completed", "failed", "cancelled"}:
                 state = str(item["workflow_status"])
-            elif item["report_terminal"] == item["terminal_handle"] and item["single_outcome"]:
+            elif current_reports[item["workflow_id"]]:
                 state = str(item["single_outcome"])
             else:
                 state = "running"

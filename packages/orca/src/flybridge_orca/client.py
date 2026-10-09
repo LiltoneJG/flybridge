@@ -23,6 +23,7 @@ from flybridge_core import (
 
 from .resolve import (
     UnresolvedAgentError,
+    resolve_codex_resume_command,
     resolve_launch_command,
     resolve_prompt_command,
     uses_builtin_tui,
@@ -30,7 +31,6 @@ from .resolve import (
 
 TIMEOUT_NAME_LOOKUP_ATTEMPTS = 3
 TUI_IDLE_TIMEOUTS_MS = (60_000, 120_000)
-SEND_TIMEOUT_SECONDS = 45
 
 
 class OrcaError(RuntimeError):
@@ -38,6 +38,16 @@ class OrcaError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.stdout = stdout
+
+
+class PromptDeliveryBlocked(OrcaError):
+    """No prompt input was written; recipient-safe delivery is unavailable."""
+
+    input_accepted = False
+    turn_started = False
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"delivery_blocked: {detail}", code="delivery_blocked")
 
 
 class OrcaStartError(OrcaError):
@@ -61,7 +71,7 @@ class OrcaTimeoutError(OrcaError):
     """A timed-out call that carries no ownership evidence.
 
     Possible orphan details are deliberately not named ``worktree_id`` or
-    ``worktree_path``: compensation reads those names to force-remove a worktree,
+    ``worktree_path``: recovery reads those names to retain the exact checkout,
     and an unverified observation must never reach that path.
     """
 
@@ -1173,30 +1183,7 @@ class OrcaClient:
         except UnresolvedAgentError as exc:
             raise OrcaError(str(exc)) from exc
         if command is not None:
-            # A one-shot agent may outlast Orca's terminal-create wait. Use a unique
-            # title so an accepted create can be recovered after that timeout.
-            launch_title = f"{title} {secrets.token_hex(8)}"
-            try:
-                result = self._json(
-                    [
-                        "terminal",
-                        "create",
-                        "--worktree",
-                        f"id:{worktree_id}",
-                        "--title",
-                        launch_title,
-                        "--command",
-                        command,
-                    ]
-                )
-            except OrcaError as exc:
-                if exc.code != "timeout" and not isinstance(exc, OrcaTimeoutError):
-                    raise
-                recovered = self._find_terminal_by_title(worktree_id, launch_title)
-                if recovered is None:
-                    raise
-                return recovered
-            return self._handle(result, "terminal")
+            return self._create_prompt_terminal(worktree_id, title, command)
         terminal = self.create_agent_terminal(worktree_id, agent, title=title, model=model)
         try:
             self.wait_for_agent(terminal)
@@ -1225,6 +1212,67 @@ class OrcaClient:
         ]
         return str(matches[0]["handle"]) if len(matches) == 1 else None
 
+    def validate_codex_resume(
+        self, agent: str, session_id: str, *, model: str | None = None
+    ) -> None:
+        """Reject unsupported command configuration before invalidating reports."""
+        try:
+            resolve_codex_resume_command(
+                agent, session_id, "", model=model, presets=self.launch_presets, which=self.which
+            )
+        except UnresolvedAgentError as exc:
+            raise OrcaError(str(exc)) from exc
+
+    def create_codex_resume_terminal(
+        self,
+        worktree_id: str,
+        worktree_path: str,
+        agent: str,
+        session_id: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+    ) -> str:
+        """Start the official resume command in a fresh owned terminal."""
+        try:
+            command = resolve_codex_resume_command(
+                agent,
+                session_id,
+                prompt,
+                model=model,
+                presets=self.launch_presets,
+                which=self.which,
+            )
+        except UnresolvedAgentError as exc:
+            raise OrcaError(str(exc)) from exc
+        return self._create_prompt_terminal(worktree_id, "FLYBRIDGE CODEX RESUME", command)
+
+    def _create_prompt_terminal(self, worktree_id: str, title: str, command: str) -> str:
+        # A one-shot agent may outlast Orca's terminal-create wait. Use a unique
+        # title so an accepted create can be recovered after that timeout.
+        launch_title = f"{title} {secrets.token_hex(8)}"
+        try:
+            result = self._json(
+                [
+                    "terminal",
+                    "create",
+                    "--worktree",
+                    f"id:{worktree_id}",
+                    "--title",
+                    launch_title,
+                    "--command",
+                    command,
+                ]
+            )
+        except OrcaError as exc:
+            if exc.code != "timeout" and not isinstance(exc, OrcaTimeoutError):
+                raise
+            recovered = self._find_terminal_by_title(worktree_id, launch_title)
+            if recovered is None:
+                raise
+            return recovered
+        return self._handle(result, "terminal")
+
     def wait_for_agent(self, terminal_handle: str) -> None:
         for timeout_ms in TUI_IDLE_TIMEOUTS_MS:
             result = self._json(
@@ -1244,19 +1292,53 @@ class OrcaClient:
                 return
         raise OrcaTimeoutError("replacement agent terminal did not become TUI-idle")
 
+    def agent_owner_state(self, worktree_id: str, terminal_handle: str | None) -> str:
+        """PTY presence/agent labels do not prove the recorded agent process is alive.
+
+        The public terminal schema has a PTY incarnation but no authoritative
+        receiver mode and agent-process incarnation. Even a stale/disconnected
+        handle is insufficient evidence to reclaim a possibly live owner's lease.
+        """
+        if not terminal_handle:
+            return "unknown"
+        try:
+            self._json(["terminal", "show", "--terminal", terminal_handle])
+        except OrcaError:
+            return "unknown"
+        return "unknown"
+
     def send_prompt(self, terminal_handle: str, prompt: str) -> None:
-        arguments = [
-            "terminal",
-            "send",
-            "--terminal",
-            terminal_handle,
-            "--text",
-            prompt,
-            "--enter",
-        ]
-        result = self._json(arguments, timeout=SEND_TIMEOUT_SECONDS)
-        if self._signal(result, "send", "accepted") is not True:
-            raise OrcaError("Orca did not accept the workflow resume prompt")
+        """Fail closed: the public send API cannot atomically bind an agent receiver.
+
+        A show/wait followed by raw text+Enter can execute the prompt in a shell
+        after voluntary exec exit or recipient takeover. Never call terminal send,
+        even when metadata labels the PTY as an agent. Retry-request only binds an
+        already accepted request and cannot make the first write safe.
+        """
+        self.check_prompt_delivery(terminal_handle)
+
+    def check_prompt_delivery(self, terminal_handle: str) -> None:
+        """Side-effect-free preflight; blocked delivery must not stale reports."""
+        try:
+            result = self._json(["terminal", "show", "--terminal", terminal_handle])
+            returned_handle = self._handle(result, "terminal")
+        except OrcaError as exc:
+            raise PromptDeliveryBlocked(
+                f"receiver cannot be verified: {exc}; no input written"
+            ) from exc
+        if returned_handle != terminal_handle:
+            raise PromptDeliveryBlocked("receiver handle changed; no input written")
+        terminal = self._required_object(result, "terminal")
+        if terminal.get("connected") is False or terminal.get("writable") is False:
+            raise PromptDeliveryBlocked(
+                "receiver is disconnected or not writable; no input written"
+            )
+        raise PromptDeliveryBlocked(
+            "Orca does not expose authoritative receiver mode/agent-process identity "
+            "and atomic incarnation-guarded prompt delivery; no input written. "
+            "Use official queue inspect/ack/ack-result commands or an explicitly "
+            "authorized new prompt-argument agent launch; exec and shell are not prompt receivers"
+        )
 
     def close_terminals(
         self, worktree_id: str, terminal_handle: str | None = None
@@ -1276,6 +1358,114 @@ class OrcaClient:
                 return {"already_closed": True}
             raise
 
-    def remove_worktree(self, worktree_id: str) -> dict[str, Any]:
-        """Remove only an explicitly persisted Flybridge-owned stale worktree."""
-        return self._json(["worktree", "rm", "--worktree", f"id:{worktree_id}", "--force"])
+    def inspect_worktree_removal(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> tuple[str, ...]:
+        """Fail closed: lack of preservation evidence never authorizes removal."""
+        path = Path(expected_path)
+        if not path.is_absolute() or path.resolve() != path or path.is_symlink():
+            raise OrcaError("removal requires the exact absolute non-symlink checkout path")
+        self.verify_worktree(worktree_id, expected_path)
+        terminals = self._json(["terminal", "list", "--worktree", f"id:{worktree_id}"])
+        rows = terminals.get("terminals")
+        if not isinstance(rows, list) or terminals.get("truncated"):
+            raise OrcaError("terminal state inspection is incomplete")
+        if any(
+            item.get("connected") is not False or item.get("writable") is not False for item in rows
+        ):
+            raise OrcaError("worktree has a live or uncertain terminal; removal refused")
+
+        def inspect() -> tuple[str, ...]:
+            facts = []
+            for arguments in (
+                ("rev-parse", "--verify", "HEAD"),
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+                (
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ),
+                ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+                ("submodule", "status", "--recursive"),
+                ("for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes"),
+            ):
+                result = self._git(expected_path, *arguments)
+                if result.returncode:
+                    raise OrcaError(result.stderr.strip() or "removal state inspection failed")
+                facts.append(result.stdout)
+            return tuple(facts)
+
+        facts = inspect()
+        head, common, status, ignored, submodules, published = facts
+        if not head.strip() or not common.strip():
+            raise OrcaError("removal identity is incomplete")
+        if not discard_unpreserved and (
+            status
+            or ignored
+            or submodules
+            or not published.strip()
+            or not expected_start_sha
+            or head.strip() != expected_start_sha
+        ):
+            raise OrcaError(
+                "unpreserved work or uncertain preservation; worktree retained. "
+                "Inspect it before explicitly using --discard-unpreserved"
+            )
+        return facts
+
+    def remove_worktree(
+        self,
+        worktree_id: str,
+        *,
+        expected_path: str,
+        expected_start_sha: str | None,
+        discard_unpreserved: bool = False,
+    ) -> dict[str, Any]:
+        """Explicit removal only; verify Git and filesystem completion."""
+        path = Path(expected_path)
+        facts = self.inspect_worktree_removal(
+            worktree_id,
+            expected_path=expected_path,
+            expected_start_sha=expected_start_sha,
+            discard_unpreserved=discard_unpreserved,
+        )
+        common = facts[1]
+        if (
+            self.inspect_worktree_removal(
+                worktree_id,
+                expected_path=expected_path,
+                expected_start_sha=expected_start_sha,
+                discard_unpreserved=discard_unpreserved,
+            )
+            != facts
+        ):
+            raise OrcaError("checkout changed during removal inspection; worktree retained")
+        arguments = ["worktree", "rm", "--worktree", f"id:{worktree_id}"]
+        if discard_unpreserved:
+            arguments.append("--force")
+        result = self._json(arguments)
+        registered = self._run(
+            ["git", "--git-dir", common.strip(), "worktree", "list", "--porcelain", "-z"],
+            timeout=60,
+        )
+        if registered.returncode:
+            raise OrcaError("removal completion inspection failed")
+        remaining = any(
+            entry == "worktree " + expected_path for entry in registered.stdout.split("\0")
+        )
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path_gone = True
+        else:
+            path_gone = False
+        if not path_gone or remaining:
+            raise OrcaError("worktree removal was incomplete; manual inspection required")
+        return result

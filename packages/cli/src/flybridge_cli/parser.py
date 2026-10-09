@@ -102,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
     dispatcher_sub = dispatcher.add_subparsers(dest="dispatcher_command", required=True)
     dispatcher_sub.add_parser("start")
     dispatcher_sub.add_parser("status")
+    dispatcher_sub.add_parser("stop", help="persist drain barrier; preserve jobs and leases")
+    recover_job = dispatcher_sub.add_parser(
+        "recover-job", help="record a proven stopped orphan job"
+    )
+    recover_job.add_argument("request")
+    recover_job.add_argument("--execution-stopped", action="store_true", required=True)
+    recover_job.add_argument("--cleanup-confirmed", action="store_true", required=True)
     dispatcher_sub.add_parser("serve", help="internal foreground service")
     status = queue_sub.add_parser("status", help="summarize resource queue states")
     status.add_argument("resource", nargs="?", help="optional resource name")
@@ -275,11 +282,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="reviewer outcome, or blocked for any orchestrated role",
     )
     single_report = workflow_sub.add_parser(
-        "single-report", help="record a single agent's result for its parent batch"
+        "single-report", help="record a single agent result or checkpoint"
     )
     single_report.add_argument("workflow_id")
     single_report.add_argument("--outcome", required=True, choices=["done", "blocked"])
     single_report.add_argument("--summary", required=True)
+    single_report.add_argument(
+        "--checkpoint", action="store_true", help="record progress, not a final result"
+    )
     batch = workflow_sub.add_parser("batch", help="inspect or watch a parent batch")
     batch_sub = batch.add_subparsers(dest="batch_command", required=True)
     batch_status = batch_sub.add_parser("status")
@@ -335,6 +345,16 @@ def build_parser() -> argparse.ArgumentParser:
         "resume", help="resume a persisted running workflow in its existing Orca worktree"
     )
     resume.add_argument("workflow_id", help="running workflow identifier")
+    resume.add_argument(
+        "--codex-session",
+        help="explicit known Codex session UUID; launches official exec resume in a fresh terminal",
+    )
+    resume.add_argument(
+        "--previous-agent-stopped",
+        action="store_true",
+        help="operator confirms the old agent process has stopped; does not stop any terminal",
+    )
+    resume.add_argument("--prompt", help="follow-up appended to the session resume prompt")
     for command in ("complete", "cancel", "fail"):
         descriptions = {
             "complete": (
@@ -415,7 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_mode = cleanup.add_mutually_exclusive_group()
     cleanup_mode.add_argument("-n", "--dry-run", action="store_true", help="report candidates only")
     cleanup_mode.add_argument(
-        "-a", "--apply", action="store_true", help="close eligible owned worktrees"
+        "-a",
+        "--apply",
+        action="store_true",
+        help="stop eligible owned agents and preserve every worktree",
     )
     cleanup.add_argument("-t", "--older-than-seconds", type=float, help="minimum stale age")
     cleanup.add_argument("-f", "--force-age", action="store_true", help="treat record age as stale")
@@ -452,7 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retire = workflow_sub.add_parser(
         "retire",
-        help="harvest worker commits, then close owned child or manager resources",
+        help="harvest worker commits, then stop agents while preserving every worktree",
     )
     retire.add_argument(
         "workflow_ids",
@@ -463,13 +486,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep",
         required=True,
         choices=["manager", "none"],
-        help="retain the manager terminal and worktree, or close the manager too",
+        help="keep the manager agent, or stop it too; all worktrees are retained",
     )
     retire.add_argument(
         "-n",
         "--dry-run",
         action="store_true",
         help="report harvest and closes without changing git or Orca resources",
+    )
+    remove_worktree = workflow_sub.add_parser(
+        "remove-worktree",
+        help="explicitly remove one retained owned checkout",
+    )
+    remove_worktree.add_argument("workflow_id", help="workflow that retained this checkout")
+    remove_worktree.add_argument(
+        "--worktree-id", required=True, help="exact retained Orca worktree ID"
+    )
+    remove_worktree.add_argument(
+        "--discard-unpreserved",
+        action="store_true",
+        help="explicitly allow loss of uncommitted, ignored, submodule or unpublished work",
     )
     link = workflow_sub.add_parser("link", help="link an explicit GitHub issue or pull request")
     link.add_argument("run_id", help="workflow run id or step id")

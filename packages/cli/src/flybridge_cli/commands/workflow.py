@@ -33,6 +33,7 @@ from flybridge_core import (
     issue_urls_from_text,
     parse_issue_url,
 )
+from flybridge_core.workflows import LifecycleOperationConflict
 
 from ..dispatcher import ensure_dispatcher
 from ..runtime import (
@@ -168,17 +169,20 @@ def _owner_terminal_state(workflow, client) -> str:
     ):
         return "invalid"
     try:
-        return (
-            "valid"
-            if client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle)
-            else "invalid"
-        )
+        state = client.agent_owner_state(workflow.adapter_reference, workflow.terminal_handle)
+        return state if state in {"valid", "invalid"} else "unknown"
     except (OSError, RuntimeError, ValueError, AttributeError):
         return "unknown"
 
 
 def _owner_terminal_valid(workflow, client) -> bool:
-    return _owner_terminal_state(workflow, client) == "valid"
+    """Observe terminal presence for UI/observer upkeep, not agent liveness."""
+    if client is None or not workflow.adapter_reference or not workflow.terminal_handle:
+        return False
+    try:
+        return client.terminal_is_valid(workflow.adapter_reference, workflow.terminal_handle)
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        return False
 
 
 def _workflow_list_item(workflow, *, owner_terminal_valid: bool) -> dict[str, object]:
@@ -643,18 +647,6 @@ def _dead_role(service: WorkflowService, manager_id: str) -> str | None:
     return "; ".join(f"{record.role} is {record.status.value}" for record in dead)
 
 
-def _remove_review_worktree(client, reviewer) -> None:
-    """Treat an already-removed reviewer worktree as successful crash replay."""
-    if not reviewer.adapter_reference or not reviewer.owns_worktree:
-        return
-    try:
-        client.remove_worktree(reviewer.adapter_reference)
-    except (OSError, RuntimeError) as exc:
-        code = str(getattr(exc, "code", ""))
-        if code != "selector_not_found" and "selector_not_found" not in str(exc):
-            raise
-
-
 def _ensure_rework_agent(service: WorkflowService, config, client, worker_id: str) -> None:
     """Replay the cycle transition until its worker has one live agent terminal."""
     worker = service.store.get(worker_id)
@@ -708,13 +700,23 @@ def _timeout_block(service: WorkflowService, client, workflow, reason: str) -> d
         service.store.set_orchestration_outcome(root_id, "blocked", error=reason)
     salvage = service.salvage_progress(root_id or workflow.id, client)
     if workflow.status == WorkflowStatus.RUNNING:
-        service.finish(
-            workflow.id,
-            WorkflowStatus.CANCELLED,
-            lambda reference: client.set_lifecycle(reference, WorkflowStatus.CANCELLED, reason),
-            error=reason,
-            close_external=client.close_terminals,
-        )
+        try:
+            service.finish(
+                workflow.id,
+                WorkflowStatus.CANCELLED,
+                lambda reference: client.set_lifecycle(reference, WorkflowStatus.CANCELLED, reason),
+                error=reason,
+                close_external=client.close_terminals,
+                timeout_snapshot=(
+                    workflow
+                    if workflow.mode == WorkflowMode.SINGLE and reason == "role-timeout"
+                    else None
+                ),
+            )
+        except LifecycleOperationConflict as exc:
+            if exc.kind != "freshness":
+                raise
+            return {"action": "waiting", "workflow_id": workflow.id, "reason": "state-changed"}
     if workflow.mode == WorkflowMode.ORCHESTRATED:
         if root_id is None:
             raise ValueError("orchestrated role has no root manager")
@@ -801,7 +803,6 @@ def _maintain_queue(service: WorkflowService, config, client, root_id: str) -> N
                     owner.id,
                 ]
             )
-            client.wait_for_agent(owner.terminal_handle)
             client.send_prompt(
                 owner.terminal_handle,
                 f"Flybridge queue reminder: you still hold resource `{item['resource']}` "
@@ -885,10 +886,8 @@ def _apply_watchdog(
     for record in records:
         if record.status != WorkflowStatus.RUNNING or record.id in waiting:
             continue
-        if (
-            record.mode == WorkflowMode.SINGLE
-            and batches.is_member(record.id)
-            and batches.single_reported(record.id, record.terminal_handle)
+        if record.mode == WorkflowMode.SINGLE and batches.single_reported(
+            record.id, record.terminal_handle
         ):
             continue
         if service.store.has_unconsumed_readiness(record.id):
@@ -948,6 +947,9 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
         waiting = set() if service.queue is None else set(service.queue.active_owners())
         if manager.id in waiting:
             return {"action": "waiting_resource", "workflow_id": manager.id}
+        manager = service.store.get(manager.id)
+        if BatchStore(config.state_dir).single_reported(manager.id, manager.terminal_handle):
+            return {"action": "reported", "workflow_id": manager.id, "status": manager.status.value}
         return {"action": "waiting", "workflow_id": manager.id}
     if manager.mode != WorkflowMode.ORCHESTRATED or manager.role != WorkflowRole.MANAGER:
         raise ValueError("workflow supervise requires an orchestrated manager or single root")
@@ -1117,8 +1119,7 @@ def _supervise_once(service: WorkflowService, config, manager_id: str) -> dict[s
         return result
     for reviewer in reviewers:
         if reviewer.adapter_reference and reviewer.external_reconciled_at is None:
-            _remove_review_worktree(client, reviewer)
-            service.store.mark_external_reconciled(reviewer.id)
+            service.stop_role_resources(reviewer, client, dry_run=False)
     trigger = next(item for item in unconsumed if item.outcome == "changes-requested")
     service.begin_next_review_cycle(manager.id, trigger.id, client)
     worker = service.store.get(worker.id)
@@ -1137,6 +1138,24 @@ def _cmd_supervise(args: argparse.Namespace, config, service: WorkflowService) -
         try:
             result = _supervise_once(service, config, args.workflow_id)
         except (OSError, RuntimeError, sqlite3.OperationalError) as exc:
+            if not is_orchestrated:
+                current = service.store.get(args.workflow_id)
+                terminal = current.status != WorkflowStatus.RUNNING
+                result = {
+                    "action": "terminal" if terminal else "retry-wait",
+                    "workflow_id": current.id,
+                    "status": current.status.value,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "retry_after_seconds": config.coordinator_retry_initial_seconds,
+                }
+                print(json.dumps(result, indent=2), flush=True)
+                if terminal:
+                    service.close_watchdog(current.id, _adapter(config), "single_terminal")
+                    return 0
+                if args.once:
+                    return 0
+                time.sleep(max(config.coordinator_retry_initial_seconds, 0.01))
+                continue
             run = service.store.record_coordinator_error(
                 args.workflow_id,
                 f"{type(exc).__name__}: {exc}",
@@ -1167,6 +1186,24 @@ def _cmd_supervise(args: argparse.Namespace, config, service: WorkflowService) -
                 print(json.dumps(result, indent=2), flush=True)
                 return 0
         except (ConfigError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+            if not is_orchestrated:
+                print(
+                    json.dumps(
+                        {
+                            "action": "supervisor_error",
+                            "workflow_id": args.workflow_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                        indent=2,
+                    ),
+                    flush=True,
+                )
+                # Stop only this monitor. An error is not proof that its agent
+                # or resource work has stopped, nor a workflow terminal outcome.
+                service.close_watchdog(
+                    args.workflow_id, _adapter(config), "single_supervisor_error"
+                )
+                return 2
             run = service.store.set_orchestration_outcome(
                 args.workflow_id, "blocked", error=f"{type(exc).__name__}: {exc}"
             )
@@ -1225,6 +1262,10 @@ def _cmd_batch_watch(args: argparse.Namespace, config, batches: BatchStore) -> i
                     batches.note_notification_error(args.batch_id, "parent terminal is unavailable")
                     return 2
                 client.wait_for_agent(parent_terminal)
+                status = batches.status(args.batch_id)
+                if not status["ready"]:
+                    batches.note_notification_error(args.batch_id, "batch changed before delivery")
+                    continue
                 client.send_prompt(
                     parent_terminal,
                     "Flybridge batch is ready for review. "
@@ -1276,6 +1317,7 @@ def _cmd_cleanup(args: argparse.Namespace, config, store: WorkflowStore) -> int:
                 {
                     "dry_run": True,
                     "candidate_count": len(candidates),
+                    "retained_worktrees": store.retained_worktrees(),
                     "candidates": [
                         {
                             "workflow_id": workflow.id,
@@ -1297,7 +1339,7 @@ def _cmd_cleanup(args: argparse.Namespace, config, store: WorkflowStore) -> int:
     result = service.reconcile_stale(
         args.older_than_seconds,
         client.close_terminals,
-        client.remove_worktree,
+        None,
         workflow_ids=tuple(args.workflow_ids) if args.workflow_ids else None,
     )
     print(
@@ -1404,6 +1446,18 @@ def _cmd_delivery_check(args: argparse.Namespace, config, store: WorkflowStore) 
     return 0 if eligible else 2
 
 
+def _cmd_remove_worktree(args: argparse.Namespace, config, store: WorkflowStore) -> int:
+    service = WorkflowService(store)
+    result = service.remove_retained_worktree(
+        args.workflow_id,
+        args.worktree_id,
+        _adapter(config),
+        discard_unpreserved=args.discard_unpreserved,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def _cmd_retire(args: argparse.Namespace, config, store: WorkflowStore) -> int:
     """Harvest, then close owned resources for each finished root."""
     service = WorkflowService(store, ResourceQueue(config.state_dir))
@@ -1492,12 +1546,34 @@ def handle(args: argparse.Namespace) -> int:
                     "workflow": asdict(workflow),
                     "run": run,
                     "blocker": blocker,
+                    "single_report": BatchStore(config.state_dir).single_report(workflow.id),
+                    "owner_agent_state": _owner_terminal_state(workflow, client),
+                    "prompt_delivery": {
+                        "transport": "existing_pty",
+                        "status": "delivery_blocked",
+                        "reason": "current Orca API has no atomic agent receiver guard",
+                        "input_accepted": False,
+                        "turn_started": False,
+                        "recovery": "inspect queue/batch status; explicit ack/ack-result; "
+                        "for a stopped known Codex session use workflow resume "
+                        "--codex-session UUID --previous-agent-stopped --prompt TEXT",
+                    },
                     "children": [asdict(child) for child in store.children(workflow.id)],
                     "artifacts": [asdict(artifact) for artifact in artifacts],
+                    "retained_worktrees": [
+                        item
+                        for item in store.retained_worktrees()
+                        if item["workflow_id"] in queue_owners
+                    ],
                     "progress": service.progress_snapshot(workflow.id),
                     "resource_queue": {
                         "requests": active_requests,
                         "pending_results": queue.pending_results(queue_owners),
+                        "pending_grants": [
+                            notification
+                            for owner_id in queue_owners
+                            for notification in queue.pending_grants(owner_id)
+                        ],
                         "recovery_blocks": queue.owner_blocks(queue_owners),
                         "attention_after_seconds": config.queue_lease_timeout_seconds,
                         "attention_required": any(
@@ -1577,12 +1653,16 @@ def handle(args: argparse.Namespace) -> int:
         return _cmd_harvest(args, config, store)
     if args.workflow_command == "delivery-check":
         return _cmd_delivery_check(args, config, store)
+    if args.workflow_command == "remove-worktree":
+        return _cmd_remove_worktree(args, config, store)
     if args.workflow_command == "retire":
         return _cmd_retire(args, config, store)
     service = WorkflowService(store, ResourceQueue(config.state_dir))
     if args.workflow_command == "single-report":
         batches = BatchStore(config.state_dir)
-        batches.report_single(args.workflow_id, args.outcome, args.summary)
+        batches.report_single(
+            args.workflow_id, args.outcome, args.summary, final=not args.checkpoint
+        )
         if batches.active_batches_for_workflow(args.workflow_id):
             _maintain_batch_watchers(config, _adapter(config), args.workflow_id)
         print(json.dumps({"workflow_id": args.workflow_id, "outcome": args.outcome}))
@@ -1706,6 +1786,9 @@ def handle(args: argparse.Namespace) -> int:
             workflow.id,
             _adapter(config),
             agent=spec.agent,
+            codex_session_id=args.codex_session,
+            previous_agent_stopped=args.previous_agent_stopped,
+            followup=args.prompt,
             model=spec.model,
             response_language=config.response_language,
             skill_paths=validate_skill_paths(config.skill_paths_for(workflow.role)),
@@ -1716,7 +1799,15 @@ def handle(args: argparse.Namespace) -> int:
             ),
             observer_enabled=bool(config.queue_observer),
         )
-        print(json.dumps({"workflow": asdict(resumed)}, indent=2))
+        result = {"workflow": asdict(resumed)}
+        if args.codex_session:
+            result["continuation"] = {
+                "transport": "codex_exec_resume",
+                "session_id": args.codex_session,
+                "launch_accepted": True,
+                "turn_started": None,
+            }
+        print(json.dumps(result, indent=2))
         return 0
     target = {
         "complete": WorkflowStatus.COMPLETED,

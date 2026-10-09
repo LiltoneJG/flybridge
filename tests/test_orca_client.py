@@ -14,7 +14,13 @@ from pathlib import Path
 import pytest
 from flybridge_core import AgentLaunchPreset
 from flybridge_orca import resolve_launch_command
-from flybridge_orca.client import OrcaClient, OrcaError, OrcaStartError, OrcaTimeoutError
+from flybridge_orca.client import (
+    OrcaClient,
+    OrcaError,
+    OrcaStartError,
+    OrcaTimeoutError,
+    PromptDeliveryBlocked,
+)
 from flybridge_orca.resolve import resolve_prompt_command
 
 
@@ -124,9 +130,10 @@ def test_start_launches_an_absolute_custom_agent_after_allocating_worktree(
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    started = OrcaClient("orca-ide", runner=runner).start(
-        tmp_path, "custom", "single", str(agent), "Implement locally."
-    )
+    with pytest.raises(OrcaStartError, match="delivery_blocked"):
+        OrcaClient("orca-ide", runner=runner).start(
+            tmp_path, "custom", "single", str(agent), "Implement locally."
+        )
 
     create = calls[1]
     assert "--agent" not in create
@@ -134,8 +141,7 @@ def test_start_launches_an_absolute_custom_agent_after_allocating_worktree(
     assert calls[2][1:3] == ["terminal", "create"]
     assert calls[2][calls[2].index("--command") + 1] == str(agent)
     assert calls[3][1:3] == ["terminal", "wait"]
-    assert calls[4][1:3] == ["terminal", "send"]
-    assert started.terminal == "local-agent-terminal"
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
 @pytest.mark.parametrize(
@@ -368,18 +374,17 @@ def test_new_non_codex_agent_uses_a_new_terminal_and_initial_prompt() -> None:
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    handle = OrcaClient(
-        "orca-ide", runner=runner, which=lambda name: f"/tmp/{name}"
-    ).create_new_agent_terminal(
-        "repo::/tmp/worktree", "/tmp/worktree", "claude", "Continue the work."
-    )
+    with pytest.raises(PromptDeliveryBlocked, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide", runner=runner, which=lambda name: f"/tmp/{name}"
+        ).create_new_agent_terminal(
+            "repo::/tmp/worktree", "/tmp/worktree", "claude", "Continue the work."
+        )
 
-    assert handle == "new-agent"
     assert calls[0][1:3] == ["terminal", "create"]
     assert calls[0][calls[0].index("--command") + 1] == str(Path("/tmp/claude").resolve())
     assert calls[1][1:3] == ["terminal", "wait"]
-    assert calls[2][1:3] == ["terminal", "send"]
-    assert calls[2][calls[2].index("--text") + 1] == "Continue the work."
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
 def test_custom_start_can_create_terminal_when_worktree_start_omits_one(tmp_path: Path) -> None:
@@ -609,24 +614,9 @@ def test_start_compensates_an_exact_partial_response_without_a_name_lookup(
     assert error.value.terminal_handle == "terminal"
     assert len(calls) == 2
 
-    def removal_runner(arguments, **_kwargs):
-        calls.append(arguments)
-        return subprocess.CompletedProcess(
-            arguments, 0, json.dumps({"ok": True, "result": {"removed": True}}), ""
-        )
-
-    assert OrcaClient("orca-ide", runner=removal_runner).remove_worktree(
-        error.value.worktree_id
-    ) == {"removed": True}
-    assert calls[-1] == [
-        "orca-ide",
-        "worktree",
-        "rm",
-        "--worktree",
-        "id:owned",
-        "--force",
-        "--json",
-    ]
+    with pytest.raises(TypeError, match="expected_path"):
+        client.remove_worktree(error.value.worktree_id)
+    assert len(calls) == 2
 
 
 def test_start_repeats_timeout_name_lookup_with_a_fixed_bound(tmp_path: Path) -> None:
@@ -799,24 +789,12 @@ def test_repository_registration_uses_the_resolved_path(tmp_path: Path) -> None:
     assert calls == [["orca-ide", "repo", "add", "--path", str(tmp_path.resolve()), "--json"]]
 
 
-def test_remove_worktree_uses_only_the_exact_persisted_reference() -> None:
+def test_remove_worktree_refuses_an_implicit_automatic_call() -> None:
     calls: list[list[str]] = []
-
-    def runner(arguments, **_kwargs):
-        calls.append(arguments)
-        return subprocess.CompletedProcess(arguments, 0, json.dumps({"ok": True, "result": {}}), "")
-
-    OrcaClient("orca-ide", runner=runner).remove_worktree("repo::/tmp/owned")
-
-    assert calls[0] == [
-        "orca-ide",
-        "worktree",
-        "rm",
-        "--worktree",
-        "id:repo::/tmp/owned",
-        "--force",
-        "--json",
-    ]
+    client = OrcaClient("orca-ide", runner=lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(TypeError, match="expected_path"):
+        client.remove_worktree("repo::/tmp/owned")
+    assert calls == []
 
 
 def test_resume_operations_use_exact_worktree_and_replace_a_stale_terminal() -> None:
@@ -854,7 +832,8 @@ def test_resume_operations_use_exact_worktree_and_replace_a_stale_terminal() -> 
     assert client.terminal_is_valid("repo::/tmp/owned", "agent-old") is False
     replacement = client.create_agent_terminal("repo::/tmp/owned", "codex")
     client.wait_for_agent(replacement)
-    client.send_prompt(replacement, "Resume the objective.")
+    with pytest.raises(PromptDeliveryBlocked):
+        client.send_prompt(replacement, "Resume the objective.")
 
     assert replacement == "agent-new"
     assert not any(call[1:3] == ["worktree", "create"] for call in calls)
@@ -868,7 +847,7 @@ def test_resume_operations_use_exact_worktree_and_replace_a_stale_terminal() -> 
         "60000",
         "120000",
     ]
-    assert calls[-1][-2:] == ["--enter", "--json"]
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
 def test_terminal_is_invalid_when_orca_reports_it_disconnected() -> None:
@@ -912,7 +891,7 @@ def test_resume_requires_tui_idle_and_prompt_acceptance_signals() -> None:
         payload = {"ok": True, "result": {"send": {"accepted": False}}}
         return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
 
-    with pytest.raises(OrcaError, match="did not accept"):
+    with pytest.raises(PromptDeliveryBlocked, match="receiver cannot be verified"):
         OrcaClient("orca-ide", runner=unaccepted_runner).send_prompt("agent", "Resume.")
 
 
@@ -1130,26 +1109,24 @@ def test_attach_uses_existing_worktree_and_never_creates_one(tmp_path: Path) -> 
             payload = {"ok": True, "result": {"terminal": {"handle": "agent-1"}}}
         elif arguments[1:3] == ["terminal", "wait"]:
             payload = {"ok": True, "result": {"wait": {"satisfied": True}}}
+        elif arguments[1:3] == ["terminal", "show"]:
+            payload = {"ok": True, "result": {"terminal": {"handle": "agent-1"}}}
+        elif arguments[1:3] == ["terminal", "close"]:
+            payload = {"ok": True, "result": {"closed": True}}
         elif arguments[1:3] == ["terminal", "send"]:
             payload = {"ok": True, "result": {"send": {"accepted": True}}}
         else:
             raise AssertionError(arguments)
         return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
 
-    started = OrcaClient(
-        "orca-ide",
-        runner=runner,
-        which=lambda name: "/tmp/fake/cursor-agent" if name == "cursor-agent" else None,
-    ).attach(repository, "existing", "single", "cursor", "Continue the PR.")
+    with pytest.raises(PromptDeliveryBlocked, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide",
+            runner=runner,
+            which=lambda name: "/tmp/fake/cursor-agent" if name == "cursor-agent" else None,
+        ).attach(repository, "existing", "single", "cursor", "Continue the PR.")
 
-    assert started.worktree_id == "repo::" + str(repository)
-    assert started.owns_worktree is False
-    assert [call[1:3] for call in calls] == [
-        ["worktree", "show"],
-        ["terminal", "create"],
-        ["terminal", "wait"],
-        ["terminal", "send"],
-    ]
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
     assert "worktree" not in {
         call[2] for call in calls if call[1] == "worktree" and call[2] != "show"
     }
@@ -1181,11 +1158,12 @@ def test_start_launches_cursor_with_explicit_trust_flags(tmp_path: Path) -> None
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    OrcaClient(
-        "orca-ide",
-        runner=runner,
-        which=lambda name: str(binary) if name == "cursor-agent" else None,
-    ).start(tmp_path, "example", "single", "cursor", "Implement the change.", model="auto")
+    with pytest.raises(OrcaStartError, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide",
+            runner=runner,
+            which=lambda name: str(binary) if name == "cursor-agent" else None,
+        ).start(tmp_path, "example", "single", "cursor", "Implement the change.", model="auto")
 
     create = next(call for call in calls if call[1:3] == ["worktree", "create"])
     assert "--agent" not in create
@@ -1195,7 +1173,7 @@ def test_start_launches_cursor_with_explicit_trust_flags(tmp_path: Path) -> None
         [str(binary.resolve()), "--trust", "--yolo", "--model", "auto"]
     )
     assert any(call[1:3] == ["terminal", "wait"] for call in calls)
-    assert any(call[1:3] == ["terminal", "send"] for call in calls)
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
 def test_create_agent_terminal_resolves_cursor_to_an_absolute_cli(tmp_path: Path) -> None:
@@ -1238,20 +1216,20 @@ def test_create_new_agent_terminal_resolves_cursor_then_waits_and_sends(tmp_path
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    handle = OrcaClient(
-        "orca-ide",
-        runner=runner,
-        which=lambda name: str(binary) if name == "agent" else None,
-    ).create_new_agent_terminal(
-        "repo::/tmp/worktree", str(tmp_path), "cursor", "Continue the work."
-    )
+    with pytest.raises(PromptDeliveryBlocked, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide",
+            runner=runner,
+            which=lambda name: str(binary) if name == "agent" else None,
+        ).create_new_agent_terminal(
+            "repo::/tmp/worktree", str(tmp_path), "cursor", "Continue the work."
+        )
 
-    assert handle == "new-agent"
     assert calls[0][calls[0].index("--command") + 1] == shlex.join(
         [str(binary.resolve()), "--trust", "--yolo"]
     )
     assert calls[1][1:3] == ["terminal", "wait"]
-    assert calls[2][1:3] == ["terminal", "send"]
+    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
 def test_create_agent_terminal_rejects_an_unresolved_cursor_id() -> None:
@@ -1283,23 +1261,23 @@ def test_start_with_cursor_model_uses_terminal_command(tmp_path: Path) -> None:
             payload = {"ok": True, "result": {"send": {"accepted": True}}}
         return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
 
-    started = OrcaClient(
-        "orca-ide",
-        runner=runner,
-        which=lambda name: str(binary) if name == "cursor-agent" else None,
-    ).start(
-        tmp_path,
-        "example",
-        "single",
-        "cursor",
-        "Review the change.",
-        model="claude-opus-5-low",
-    )
+    with pytest.raises(OrcaStartError, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide",
+            runner=runner,
+            which=lambda name: str(binary) if name == "cursor-agent" else None,
+        ).start(
+            tmp_path,
+            "example",
+            "single",
+            "cursor",
+            "Review the change.",
+            model="claude-opus-5-low",
+        )
 
     create = next(call for call in calls if call[1:3] == ["worktree", "create"])
     command = next(call for call in calls if call[1:3] == ["terminal", "create"])
     assert "--agent" not in create
-    assert started.terminal == "model-term"
     assert command[command.index("--command") + 1] == shlex.join(
         [
             str(binary.resolve()),
@@ -1333,19 +1311,20 @@ def test_start_with_ollama_runs_the_named_model(tmp_path: Path) -> None:
             payload = {"ok": True, "result": {"send": {"accepted": True}}}
         return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
 
-    OrcaClient(
-        "orca-ide",
-        runner=runner,
-        which=lambda name: str(binary) if name == "ollama" else None,
-    ).start(
-        tmp_path,
-        "example",
-        "orchestrated",
-        "ollama",
-        "Review the change.",
-        role="reviewer",
-        model="gemma4:26b",
-    )
+    with pytest.raises(OrcaStartError, match="delivery_blocked"):
+        OrcaClient(
+            "orca-ide",
+            runner=runner,
+            which=lambda name: str(binary) if name == "ollama" else None,
+        ).start(
+            tmp_path,
+            "example",
+            "orchestrated",
+            "ollama",
+            "Review the change.",
+            role="reviewer",
+            model="gemma4:26b",
+        )
 
     command = next(call for call in calls if call[1:3] == ["terminal", "create"])
     assert command[command.index("--command") + 1] == shlex.join(

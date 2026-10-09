@@ -11,7 +11,14 @@ from math import isfinite
 from flybridge_application import QueueLeaseNotifier, WorkflowService
 from flybridge_core import ResourceQueue, WorkflowStore
 
-from ..dispatcher import QueueDispatcher, dispatcher_status, ensure_dispatcher
+from ..dispatcher import (
+    QueueDispatcher,
+    dispatcher_status,
+    ensure_dispatcher,
+    recover_dispatcher_job,
+    request_dispatcher_stop,
+    start_dispatcher,
+)
 from ..runtime import _adapter, _config, _running_owner
 
 _WATCH_ERRORS = (OSError, RuntimeError, ValueError, sqlite3.Error)
@@ -109,7 +116,16 @@ def handle(args: argparse.Namespace) -> int:
         if args.dispatcher_command == "serve":
             return QueueDispatcher(config).serve()
         if args.dispatcher_command == "start":
-            ensure_dispatcher(config.path, config.state_dir)
+            start_dispatcher(config.path, config.state_dir)
+        if args.dispatcher_command == "stop":
+            request_dispatcher_stop(queue)
+        if args.dispatcher_command == "recover-job":
+            recover_dispatcher_job(
+                queue,
+                args.request,
+                execution_stopped=args.execution_stopped,
+                cleanup_confirmed=args.cleanup_confirmed,
+            )
         print(json.dumps(dispatcher_status(queue), indent=2))
     elif args.queue_command == "status":
         summary = queue.status(args.resource)

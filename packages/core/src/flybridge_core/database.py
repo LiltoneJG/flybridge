@@ -7,11 +7,43 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 9
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
+_DISPATCHER_V8_CONTROL = """
+CREATE TABLE queue_dispatcher_control (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+    instance TEXT,
+    phase TEXT NOT NULL DEFAULT 'stopped'
+)
+"""
+
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE queue_dispatcher_control (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+        instance TEXT,
+        phase TEXT NOT NULL DEFAULT 'stopped',
+        pid INTEGER,
+        process_identity TEXT
+    )
+    """,
+    """
+    CREATE TABLE retained_worktrees (
+        adapter_reference TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id),
+        worktree_path TEXT NOT NULL,
+        start_sha TEXT,
+        owns_worktree INTEGER NOT NULL CHECK(owns_worktree IN (0, 1)),
+        state TEXT NOT NULL CHECK(state IN ('retained', 'removing', 'remove_failed', 'deleted')),
+        error TEXT,
+        retained_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE workflow_runs (
         id TEXT PRIMARY KEY,
@@ -372,6 +404,12 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE single_report_phases (
+        workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+        final INTEGER NOT NULL CHECK(final IN (0, 1))
+    )
+    """,
+    """
     CREATE TABLE queue_events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
         resource TEXT NOT NULL, request_id TEXT NOT NULL, event TEXT NOT NULL
@@ -630,7 +668,41 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 5")
-        return 5
+        version = 5
+    if version == 5:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE retained_worktrees" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 6")
+        version = 6
+    if version == 6:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE single_report_phases" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 7")
+        version = 7
+    if version == 7:
+        connection.execute(
+            _DISPATCHER_V8_CONTROL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+        )
+        connection.execute("PRAGMA user_version = 8")
+        version = 8
+    if version == 8:
+        control = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='queue_dispatcher_control'"
+        ).fetchone()
+        if control is None or _normalized(control[0]) != _normalized(_DISPATCHER_V8_CONTROL):
+            raise RuntimeError(
+                "unsupported Flybridge state schema: intermediate dispatcher control"
+            )
+        connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN pid INTEGER")
+        connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN process_identity TEXT")
+        connection.execute("PRAGMA user_version = 9")
+        return 9
     return version
 
 
