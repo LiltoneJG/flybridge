@@ -7,11 +7,30 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
+_DISPATCHER_V8_CONTROL = """
+CREATE TABLE queue_dispatcher_control (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+    instance TEXT,
+    phase TEXT NOT NULL DEFAULT 'stopped'
+)
+"""
+
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE queue_dispatcher_control (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+        instance TEXT,
+        phase TEXT NOT NULL DEFAULT 'stopped',
+        pid INTEGER,
+        process_identity TEXT
+    )
+    """,
     """
     CREATE TABLE retained_worktrees (
         adapter_reference TEXT PRIMARY KEY,
@@ -665,7 +684,25 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 7")
-        return 7
+        version = 7
+    if version == 7:
+        connection.execute(
+            _DISPATCHER_V8_CONTROL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+        )
+        connection.execute("PRAGMA user_version = 8")
+        version = 8
+    if version == 8:
+        control = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='queue_dispatcher_control'"
+        ).fetchone()
+        if control is None or _normalized(control[0]) != _normalized(_DISPATCHER_V8_CONTROL):
+            raise RuntimeError(
+                "unsupported Flybridge state schema: intermediate dispatcher control"
+            )
+        connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN pid INTEGER")
+        connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN process_identity TEXT")
+        connection.execute("PRAGMA user_version = 9")
+        return 9
     return version
 
 

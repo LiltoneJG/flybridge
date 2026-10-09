@@ -102,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
     dispatcher_sub = dispatcher.add_subparsers(dest="dispatcher_command", required=True)
     dispatcher_sub.add_parser("start")
     dispatcher_sub.add_parser("status")
+    dispatcher_sub.add_parser("stop", help="persist drain barrier; preserve jobs and leases")
+    recover_job = dispatcher_sub.add_parser(
+        "recover-job", help="record a proven stopped orphan job"
+    )
+    recover_job.add_argument("request")
+    recover_job.add_argument("--execution-stopped", action="store_true", required=True)
+    recover_job.add_argument("--cleanup-confirmed", action="store_true", required=True)
     dispatcher_sub.add_parser("serve", help="internal foreground service")
     status = queue_sub.add_parser("status", help="summarize resource queue states")
     status.add_argument("resource", nargs="?", help="optional resource name")

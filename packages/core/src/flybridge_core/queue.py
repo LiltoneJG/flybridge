@@ -475,6 +475,10 @@ class ResourceQueue:
     def claim_job(self, request_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM queue_dispatcher_control WHERE singleton=1 AND paused=1"
+            ).fetchone():
+                return None
             row = connection.execute(
                 "SELECT j.*, q.resource, q.owner FROM queue_jobs j "
                 "JOIN queue_requests q ON q.id=j.request_id "

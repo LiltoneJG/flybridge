@@ -3137,6 +3137,7 @@ def test_schema_migrates_activated_at_from_version_1(tmp_path: Path) -> None:
     workflow = store.create(tmp_path, "single", "migrate", "Implement.")
     with sqlite3.connect(store.path) as connection:
         connection.execute("ALTER TABLE workflows DROP COLUMN activated_at")
+        connection.execute("DROP TABLE IF EXISTS queue_dispatcher_control")
         connection.execute("PRAGMA user_version = 1")
         connection.commit()
 
@@ -3154,6 +3155,7 @@ def test_schema_migrates_salvage_pushes_from_version_4(tmp_path: Path) -> None:
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP INDEX IF EXISTS workflow_salvage_push_order")
         connection.execute("DROP TABLE workflow_salvage_pushes")
+        connection.execute("DROP TABLE IF EXISTS queue_dispatcher_control")
         connection.execute("PRAGMA user_version = 4")
         connection.commit()
 

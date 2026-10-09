@@ -268,6 +268,7 @@ def test_schema_six_single_reports_survive_migration(tmp_path: Path) -> None:
     batches.report_single(single_id, "blocked", "Existing report.")
     with store._connect() as connection:
         connection.execute("DROP TABLE single_report_phases")
+        connection.execute("DROP TABLE IF EXISTS queue_dispatcher_control")
         connection.execute("PRAGMA user_version = 6")
     upgraded = BatchStore(tmp_path)
     assert upgraded.single_reported(single_id, store.get(single_id).terminal_handle)

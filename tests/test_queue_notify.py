@@ -64,6 +64,7 @@ def test_version_two_migration_recovers_unacknowledged_promotion(tmp_path: Path)
             "queue_resource_blocks",
         ):
             connection.execute(f"DROP TABLE {table}")
+        connection.execute("DROP TABLE IF EXISTS queue_dispatcher_control")
         connection.execute("PRAGMA user_version = 2")
 
     reopened = ResourceQueue(tmp_path)

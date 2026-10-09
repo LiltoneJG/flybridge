@@ -334,6 +334,7 @@ def test_schema_5_migration_preserves_workflows(tmp_path):
     workflow = store.create(tmp_path, "single", "existing", "Keep history.")
     with store._connect() as connection:
         connection.execute("DROP TABLE retained_worktrees")
+        connection.execute("DROP TABLE IF EXISTS queue_dispatcher_control")
         connection.execute("PRAGMA user_version=5")
     fresh = WorkflowStore(tmp_path)
     assert fresh.get(workflow.id).objective == "Keep history."

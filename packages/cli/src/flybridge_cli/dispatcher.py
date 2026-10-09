@@ -6,17 +6,45 @@ import fcntl
 import json
 import os
 import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flybridge_application.prompts import render_lease_grant_prompt
 from flybridge_core import ResourceQueue, WorkflowStatus, WorkflowStore
 from flybridge_orca import OrcaClient
+
+
+@contextmanager
+def _drain_signals(handler, queue, instance):
+    previous = {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for sig, old_handler in previous.items():
+            signal.signal(sig, old_handler)
+        with queue._connect() as connection:
+            connection.execute(
+                "UPDATE queue_dispatcher_control SET paused=1, phase='stopped' WHERE instance=?",
+                (instance,),
+            )
+
+
+def _process_identity(pid: int) -> str | None:
+    """Linux incarnation identity for status only; never a licence to send a signal."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return f"{boot}:{stat[19]}"
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 def _now() -> str:
@@ -48,7 +76,129 @@ def dispatcher_status(queue: ResourceQueue) -> dict[str, object]:
         heartbeat
         and datetime.fromisoformat(str(heartbeat)) > datetime.now(UTC) - timedelta(seconds=5)
     )
+    with queue._connect() as connection:
+        control = connection.execute(
+            "SELECT * FROM queue_dispatcher_control WHERE singleton=1"
+        ).fetchone()
+        result["running_jobs"] = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE status='running'"
+        ).fetchone()[0]
+    result["control"] = dict(control) if control else None
+    result["lock_held"] = _lock_held(queue.path.parent)
+    result["legacy_or_unknown"] = bool(
+        result["lock_held"]
+        and (
+            not control
+            or not control["instance"]
+            or control["phase"] == "stopped"
+            or not control["process_identity"]
+            or control["pid"] != result.get("pid")
+            or _process_identity(control["pid"]) != control["process_identity"]
+        )
+    )
+    result["running"] = bool(result["running"] and result["lock_held"])
+    result["stop_complete"] = bool(
+        control and control["paused"] and not result["lock_held"] and not result["running_jobs"]
+    )
+    result["limitation"] = (
+        "legacy/unknown daemon does not honor drain; no PID is signalled; parent-managed migration required"
+        if result["legacy_or_unknown"]
+        else None
+    )
     return result
+
+
+def _paused(queue: ResourceQueue) -> bool:
+    with queue._connect() as connection:
+        return bool(
+            connection.execute(
+                "SELECT 1 FROM queue_dispatcher_control WHERE singleton=1 AND paused=1"
+            ).fetchone()
+        )
+
+
+def request_dispatcher_stop(queue: ResourceQueue) -> None:
+    """Persist a claim/start barrier. Never signal a PID or revoke resource ownership."""
+    with queue._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO queue_dispatcher_control(singleton, paused) VALUES (1, 1) "
+            "ON CONFLICT(singleton) DO UPDATE SET paused=1"
+        )
+
+
+def start_dispatcher(config_path: Path, state_dir: Path) -> None:
+    queue = ResourceQueue(state_dir)
+    with _lock_path(state_dir).open("a+b") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "dispatcher still owns lock; wait for drain or legacy migration"
+            ) from exc
+        with queue._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM queue_jobs WHERE status='running'").fetchone():
+                raise RuntimeError("running jobs have unknown liveness; preserve and inspect them")
+            connection.execute(
+                "INSERT INTO queue_dispatcher_control(singleton, paused) VALUES (1, 0) "
+                "ON CONFLICT(singleton) DO UPDATE SET paused=0"
+            )
+    ensure_dispatcher(config_path, state_dir)
+
+
+def recover_dispatcher_job(
+    queue: ResourceQueue, request_id: str, *, execution_stopped: bool, cleanup_confirmed: bool
+) -> None:
+    """Record operator-proven orphan completion; never terminate or replay its command."""
+    if not execution_stopped or not cleanup_confirmed:
+        raise ValueError("execution-stopped and cleanup-confirmed are both required")
+    with _lock_path(queue.path.parent).open("a+b") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("dispatcher still owns lock; recovery refused") from exc
+        with queue._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            control = connection.execute(
+                "SELECT paused FROM queue_dispatcher_control WHERE singleton=1"
+            ).fetchone()
+            if not control or not control["paused"]:
+                raise ValueError("persist dispatcher stop barrier before recovery")
+            row = connection.execute(
+                "SELECT q.resource FROM queue_jobs j JOIN queue_requests q ON q.id=j.request_id "
+                "WHERE j.request_id=? AND j.status='running'",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("running queue job was not found")
+            resource = str(row["resource"])
+            block = connection.execute(
+                "SELECT request_id FROM queue_resource_blocks WHERE resource=?",
+                (resource,),
+            ).fetchone()
+            if block and block["request_id"] != request_id:
+                raise ValueError("resource has a different recovery owner")
+            connection.execute(
+                "UPDATE queue_jobs SET status='failed', finished_at=?, "
+                "error='operator confirmed execution stopped and cleanup' "
+                "WHERE request_id=?",
+                (_now(), request_id),
+            )
+            connection.execute(
+                "UPDATE queue_requests SET status='released', updated_at=? "
+                "WHERE id=? AND status='leased'",
+                (_now(), request_id),
+            )
+            connection.execute(
+                "DELETE FROM queue_resource_blocks WHERE request_id=?", (request_id,)
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO queue_result_notifications(request_id) VALUES (?)",
+                (request_id,),
+            )
+            queue._event(connection, resource, request_id, "recovered")
+            queue._promote(connection, resource)
 
 
 def ensure_dispatcher(config_path: Path, state_dir: Path) -> None:
@@ -64,6 +214,14 @@ def ensure_dispatcher(config_path: Path, state_dir: Path) -> None:
             # still ensures exactly one dispatcher performs work.
             pass
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    queue = ResourceQueue(state_dir)
+    with queue._connect() as connection:
+        if connection.execute(
+            "SELECT 1 FROM queue_dispatcher_control WHERE singleton=1 AND paused=1"
+        ).fetchone():
+            return
+        if connection.execute("SELECT 1 FROM queue_jobs WHERE status='running'").fetchone():
+            raise RuntimeError("running jobs have unknown liveness; automatic restart refused")
     child = subprocess.Popen(
         [
             sys.executable,
@@ -83,7 +241,10 @@ def ensure_dispatcher(config_path: Path, state_dir: Path) -> None:
     )
     queue = ResourceQueue(state_dir)
     for _ in range(30):
-        if _lock_held(state_dir) and dispatcher_status(queue)["running"]:
+        status = dispatcher_status(queue)
+        if status.get("control") and status["control"]["paused"]:
+            return
+        if _lock_held(state_dir) and status["running"]:
             return
         if child.poll() is not None and not _lock_held(state_dir):
             break
@@ -238,8 +399,33 @@ class QueueDispatcher:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return 0
-            self.queue.abandon_running_jobs()
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            instance = str(uuid.uuid4())
+            with self.queue._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                control = connection.execute(
+                    "SELECT paused FROM queue_dispatcher_control WHERE singleton=1"
+                ).fetchone()
+                if control and control["paused"]:
+                    return 0
+                if connection.execute("SELECT 1 FROM queue_jobs WHERE status='running'").fetchone():
+                    return 1
+                connection.execute(
+                    "INSERT INTO queue_dispatcher_control(singleton, paused, instance, pid, "
+                    "process_identity, phase) VALUES (1, 0, ?, ?, ?, 'serving') "
+                    "ON CONFLICT(singleton) DO UPDATE SET instance=excluded.instance, "
+                    "pid=excluded.pid, process_identity=excluded.process_identity, phase='serving'",
+                    (instance, os.getpid(), _process_identity(os.getpid())),
+                )
+            stopping = False
+
+            def drain_signal(_signum, _frame):
+                nonlocal stopping
+                stopping = True
+
+            with (
+                _drain_signals(drain_signal, self.queue, instance),
+                ThreadPoolExecutor(max_workers=8) as pool,
+            ):
                 running = {}
                 while True:
                     try:
@@ -253,17 +439,39 @@ class QueueDispatcher:
                                         request_id, f"job executor failed: {exc}"
                                     )
                                 del running[request_id]
+                        if stopping:
+                            request_dispatcher_stop(self.queue)
+                        with self.queue._connect() as connection:
+                            paused = connection.execute(
+                                "SELECT paused FROM queue_dispatcher_control WHERE singleton=1"
+                            ).fetchone()[0]
+                            if paused:
+                                connection.execute(
+                                    "UPDATE queue_dispatcher_control SET phase=? WHERE instance=?",
+                                    ("draining" if running else "stopped", instance),
+                                )
+                        if paused:
+                            if not running:
+                                return 0
+                            time.sleep(0.1)
+                            continue
                         self._check_dead_owners()
                         for item in self.queue.queued_jobs():
                             if len(running) >= 8:
                                 break
+                            if stopping:
+                                request_dispatcher_stop(self.queue)
                             request_id = str(item["request_id"])
                             if request_id not in running:
                                 claimed = self.queue.claim_job(request_id)
                                 if claimed is not None:
                                     running[request_id] = pool.submit(self._execute, claimed)
-                        self._deliver_grants()
-                        self._deliver_results()
+                        if stopping:
+                            request_dispatcher_stop(self.queue)
+                        if not _paused(self.queue):
+                            self._deliver_grants()
+                        if not _paused(self.queue):
+                            self._deliver_results()
                     except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                         self._heartbeat(str(exc))
                     time.sleep(1)

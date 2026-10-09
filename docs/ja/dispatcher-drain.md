@@ -1,0 +1,19 @@
+# Dispatcherの停止と復旧
+
+停止・起動の対象は選択した設定のstate directoryだけです。保存PIDへsignalを送らず、actorやjobの子processを止めません。
+
+## 新protocolの停止・起動
+
+`queue dispatcher stop`は永続barrierを設定してstatusを返します。これは非同期のdrain要求です。claimと同じSQLiteの`BEGIN IMMEDIATE`で直列化し、先にclaimされたjobはcommandとcleanup checkの完了まで待ちます。先にstopがcommitされればclaimを拒否します。新規request、manual lease、FIFO、未ACK結果は保持します。自動起動と遅れて起動した`serve`もbarrierを守ります。drain中は通知配送を抑止します。新しいforeground serviceのSIGTERM/SIGINTもdrainを要求し、子jobは殺害しません。
+
+`status`の`stop_complete: true`、`lock_held: false`、`running_jobs: 0`を確認してから明示的な`start`で再開します。別processがlockを持つ場合やrunning jobが残る場合はstartを拒否します。heartbeatだけでは停止・所有権の証明になりません。PIDのincarnation照合はstatus用で、停止権限ではありません。
+
+起動時にrunning jobをabandonまたは再実行しません。dispatcherが不在でも子processのlivenessは未知としてjobとleaseを保全します。operatorが実行停止と外部cleanupを確認した後だけ、stop barrierとexclusive lockの空きを条件に`queue dispatcher recover-job REQUEST --execution-stopped --cleanup-confirmed`で対象jobを失敗として確定できます。commandとcleanup checkの終了コードは未知のままです。結果ACKは残し、FIFOを昇格します。drainの強制終了timeoutはありません。
+
+## 旧daemonの移行
+
+旧daemonはbarrierを知らず、claimや古い通知を続け得ます。`legacy_or_unknown`で限界を示し、CLIはsignalを送りません。親は対象stateの全producer・旧版の自動起動元・通知元を凍結し、running jobと配送がない境界を確認します。processのincarnation、config/state、lock owner、子processを確認し、必要な外部停止は親の明示判断とpidfd等のidentityを束縛する手段で行います。不明点があれば保全して移行を延期します。queued job、manual lease、未ACK結果をcancelやreleaseする必要はありません。
+
+schema8は既知の4field control定義を固定します。PIDとprocess identityの追加はschema9への明示migrationです。未知のschema8定義はtransactionをcommitせず拒否します。新CLIはschema7/8をschema9へ移行し、旧CLIは更新後のschemaを拒否します。そのためlive旧版stateを新CLIで実験せず、親がproducer凍結と全起動元の更新を調整します。旧processの終了後も凍結を保持し、新版でbarrier、lock不在、running jobゼロを確認してからstartします。新protocol serviceの確認後に凍結を解除します。
+
+既存PTYへの配送はfail-closedを維持し、raw-PTY fallbackはありません。自動検証はtemp stateとmock Orca/agentのみで行います。本番移行は別の親判断が必要です。
