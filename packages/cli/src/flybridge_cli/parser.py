@@ -347,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("workflow_id", help="running workflow identifier")
     resume.add_argument(
         "--codex-session",
-        help="explicit known Codex session UUID; launches official exec resume in a fresh terminal",
+        help="explicit known Codex session UUID; launches official interactive resume in a fresh terminal",
     )
     resume.add_argument(
         "--previous-agent-stopped",

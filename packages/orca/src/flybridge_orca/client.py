@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,11 @@ from .resolve import (
 
 TIMEOUT_NAME_LOOKUP_ATTEMPTS = 3
 TUI_IDLE_TIMEOUTS_MS = (60_000, 120_000)
+# Orca's UI adds a default terminal to a new worktree a moment after creation and does not
+# report it in the create result. Worktree removal also finishes after `worktree rm` returns.
+BOOTSTRAP_TERMINAL_POLL_ATTEMPTS = 10
+REMOVAL_POLL_ATTEMPTS = 20
+POLL_INTERVAL_SECONDS = 0.5
 
 
 class OrcaError(RuntimeError):
@@ -124,11 +130,13 @@ class OrcaClient:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         which: Callable[[str], str | None] = shutil.which,
         launch_presets: dict[str, AgentLaunchPreset] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.executable = executable
         self.runner = runner
         self.which = which
         self.launch_presets = launch_presets
+        self.sleep = sleep
 
     @staticmethod
     def _stop_process(process: subprocess.Popen[str]) -> None:
@@ -559,6 +567,7 @@ class OrcaClient:
                 if result.get("startupTerminal") is not None:
                     bootstrap_terminal = self._handle(result, "startupTerminal")
                     self.close_terminals(worktree_id, bootstrap_terminal)
+                self._close_default_terminals(worktree_id)
                 terminal = self.create_new_agent_terminal(
                     worktree_id,
                     worktree,
@@ -587,6 +596,29 @@ class OrcaClient:
             ) from exc
         self.rename_terminal(terminal, self._agent_terminal_title(name, role, mode))
         return StartedWorkflow(name, worktree_id, worktree, terminal, mode)
+
+    def _close_default_terminals(self, worktree_id: str) -> None:
+        """Close the terminal Orca's UI adds to a worktree this call has just created.
+
+        Nothing else can own a terminal in a brand-new worktree. A leftover terminal
+        makes `remove_worktree` refuse. Best effort: failing to list or close one only
+        leaves it for the operator, so it never fails the start.
+        """
+        for attempt in range(BOOTSTRAP_TERMINAL_POLL_ATTEMPTS):
+            try:
+                rows = self._json(["terminal", "list", "--worktree", f"id:{worktree_id}"]).get(
+                    "terminals"
+                )
+                if isinstance(rows, list) and rows:
+                    for row in rows:
+                        handle = row.get("handle") if isinstance(row, dict) else None
+                        if isinstance(handle, str) and handle:
+                            self.close_terminals(worktree_id, handle)
+                    return
+            except OrcaError:
+                return
+            if attempt + 1 < BOOTSTRAP_TERMINAL_POLL_ATTEMPTS:
+                self.sleep(POLL_INTERVAL_SECONDS)
 
     def attach(
         self,
@@ -1451,21 +1483,24 @@ class OrcaClient:
         if discard_unpreserved:
             arguments.append("--force")
         result = self._json(arguments)
-        registered = self._run(
-            ["git", "--git-dir", common.strip(), "worktree", "list", "--porcelain", "-z"],
-            timeout=60,
-        )
-        if registered.returncode:
-            raise OrcaError("removal completion inspection failed")
-        remaining = any(
-            entry == "worktree " + expected_path for entry in registered.stdout.split("\0")
-        )
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            path_gone = True
-        else:
-            path_gone = False
-        if not path_gone or remaining:
-            raise OrcaError("worktree removal was incomplete; manual inspection required")
-        return result
+        for attempt in range(REMOVAL_POLL_ATTEMPTS):
+            registered = self._run(
+                ["git", "--git-dir", common.strip(), "worktree", "list", "--porcelain", "-z"],
+                timeout=60,
+            )
+            if registered.returncode:
+                raise OrcaError("removal completion inspection failed")
+            remaining = any(
+                entry == "worktree " + expected_path for entry in registered.stdout.split("\0")
+            )
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                path_gone = True
+            else:
+                path_gone = False
+            if path_gone and not remaining:
+                return result
+            if attempt + 1 < REMOVAL_POLL_ATTEMPTS:
+                self.sleep(POLL_INTERVAL_SECONDS)
+        raise OrcaError("worktree removal was incomplete; manual inspection required")

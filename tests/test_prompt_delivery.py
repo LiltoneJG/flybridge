@@ -269,7 +269,8 @@ def test_official_codex_resume_uses_quoted_argv_in_a_fresh_terminal() -> None:
         == "term-new"
     )
     command = shlex.split(calls[0][calls[0].index("--command") + 1])
-    assert command[:3] == ["/mock/codex", "exec", "resume"]
+    assert command[:2] == ["/mock/codex", "resume"]
+    assert "exec" not in command
     assert command[-2:] == [session, prompt]
     assert "--last" not in command
     assert not any(call[1:3] == ["terminal", "send"] for call in calls)

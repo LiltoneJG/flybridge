@@ -21,7 +21,11 @@ from flybridge_orca.client import (
     OrcaTimeoutError,
     PromptDeliveryBlocked,
 )
-from flybridge_orca.resolve import resolve_prompt_command
+from flybridge_orca.resolve import (
+    UnresolvedAgentError,
+    resolve_codex_resume_command,
+    resolve_prompt_command,
+)
 
 
 def _missing_selector(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -79,18 +83,18 @@ def test_start_uses_worktree_id_and_defers_orca_lifecycle_until_owned(tmp_path: 
     assert calls[0][1:3] == ["worktree", "show"]
     assert calls[1][:3] == ["orca-ide", "worktree", "create"]
     assert "--no-parent" in calls[1]
-    assert calls[3][1:3] == ["terminal", "create"]
-    assert shlex.split(calls[3][calls[3].index("--command") + 1]) == [
+    assert calls[3][1:3] == ["terminal", "list"]
+    assert calls[4][1:3] == ["terminal", "create"]
+    assert shlex.split(calls[4][calls[4].index("--command") + 1]) == [
         str(Path("/tmp/codex").resolve()),
-        "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "Implement the change.",
     ]
 
     OrcaClient("orca-ide", runner=runner).set_lifecycle(started.worktree_id, "running")
 
-    assert calls[4][1:3] == ["worktree", "show"]
-    assert calls[5] == [
+    assert calls[5][1:3] == ["worktree", "show"]
+    assert calls[6] == [
         "orca-ide",
         "worktree",
         "set",
@@ -138,9 +142,10 @@ def test_start_launches_an_absolute_custom_agent_after_allocating_worktree(
     create = calls[1]
     assert "--agent" not in create
     assert "--prompt" not in create
-    assert calls[2][1:3] == ["terminal", "create"]
-    assert calls[2][calls[2].index("--command") + 1] == str(agent)
-    assert calls[3][1:3] == ["terminal", "wait"]
+    assert calls[2][1:3] == ["terminal", "list"]
+    assert calls[3][1:3] == ["terminal", "create"]
+    assert calls[3][calls[3].index("--command") + 1] == str(agent)
+    assert calls[4][1:3] == ["terminal", "wait"]
     assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
@@ -205,7 +210,9 @@ def test_client_rejects_invalid_orca_response() -> None:
         OrcaClient("orca-ide", runner=runner).close_terminals("repo::/tmp/worktree", "terminal-1")
 
 
-def test_new_codex_agent_runs_its_initial_prompt_in_one_shot_mode(tmp_path: Path) -> None:
+def test_new_codex_agent_starts_an_interactive_session_with_its_initial_prompt(
+    tmp_path: Path,
+) -> None:
     calls: list[list[str]] = []
 
     def runner(arguments, **_kwargs):
@@ -225,7 +232,6 @@ def test_new_codex_agent_runs_its_initial_prompt_in_one_shot_mode(tmp_path: Path
     command = calls[0][calls[0].index("--command") + 1]
     assert shlex.split(command) == [
         str(Path("/tmp/codex").resolve()),
-        "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "Inspect changes and continue.",
     ]
@@ -306,14 +312,13 @@ def test_codex_model_arguments_come_from_the_tracked_preset() -> None:
 
     assert shlex.split(command) == [
         "/opt/bin/codex",
-        "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         "gpt-5.6",
     ]
 
 
-def test_codex_prompt_command_quotes_prompt_for_one_shot_exec() -> None:
+def test_codex_prompt_command_quotes_prompt_for_an_interactive_session() -> None:
     prompt = "Implement 'this' safely; keep the spaces."
     command = resolve_prompt_command(
         "codex",
@@ -324,7 +329,6 @@ def test_codex_prompt_command_quotes_prompt_for_one_shot_exec() -> None:
 
     assert shlex.split(command) == [
         "/opt/bin/codex",
-        "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         "gpt-5.6-luna",
@@ -1156,7 +1160,7 @@ def test_attach_uses_existing_worktree_and_never_creates_one(tmp_path: Path) -> 
     )
 
 
-def test_start_launches_cursor_with_explicit_trust_flags(tmp_path: Path) -> None:
+def test_start_launches_cursor_with_explicit_trust_flags_and_prompt(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     binary = tmp_path / "cursor-agent"
     binary.write_text("#!/bin/sh\n")
@@ -1177,21 +1181,20 @@ def test_start_launches_cursor_with_explicit_trust_flags(tmp_path: Path) -> None
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    with pytest.raises(OrcaStartError, match="delivery_blocked"):
-        OrcaClient(
-            "orca-ide",
-            runner=runner,
-            which=lambda name: str(binary) if name == "cursor-agent" else None,
-        ).start(tmp_path, "example", "single", "cursor", "Implement the change.", model="auto")
+    OrcaClient(
+        "orca-ide",
+        runner=runner,
+        which=lambda name: str(binary) if name == "cursor-agent" else None,
+    ).start(tmp_path, "example", "single", "cursor", "Implement the change.", model="auto")
 
     create = next(call for call in calls if call[1:3] == ["worktree", "create"])
     assert "--agent" not in create
     assert "--prompt" not in create
     terminal = next(call for call in calls if call[1:3] == ["terminal", "create"])
     assert terminal[terminal.index("--command") + 1] == shlex.join(
-        [str(binary.resolve()), "--trust", "--yolo", "--model", "auto"]
+        [str(binary.resolve()), "--trust", "--yolo", "--model", "auto", "Implement the change."]
     )
-    assert any(call[1:3] == ["terminal", "wait"] for call in calls)
+    assert not any(call[1:3] == ["terminal", "wait"] for call in calls)
     assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
 
@@ -1218,7 +1221,7 @@ def test_create_agent_terminal_resolves_cursor_to_an_absolute_cli(tmp_path: Path
     )
 
 
-def test_create_new_agent_terminal_resolves_cursor_then_waits_and_sends(tmp_path: Path) -> None:
+def test_create_new_agent_terminal_launches_cursor_with_the_prompt_argument(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     binary = tmp_path / "agent"
     binary.write_text("#!/bin/sh\n")
@@ -1235,20 +1238,19 @@ def test_create_new_agent_terminal_resolves_cursor_then_waits_and_sends(tmp_path
             arguments, 0, json.dumps({"ok": True, "result": result}), ""
         )
 
-    with pytest.raises(PromptDeliveryBlocked, match="delivery_blocked"):
-        OrcaClient(
-            "orca-ide",
-            runner=runner,
-            which=lambda name: str(binary) if name == "agent" else None,
-        ).create_new_agent_terminal(
-            "repo::/tmp/worktree", str(tmp_path), "cursor", "Continue the work."
-        )
-
-    assert calls[0][calls[0].index("--command") + 1] == shlex.join(
-        [str(binary.resolve()), "--trust", "--yolo"]
+    handle = OrcaClient(
+        "orca-ide",
+        runner=runner,
+        which=lambda name: str(binary) if name == "agent" else None,
+    ).create_new_agent_terminal(
+        "repo::/tmp/worktree", str(tmp_path), "cursor", "Continue the work."
     )
-    assert calls[1][1:3] == ["terminal", "wait"]
-    assert not any(call[1:3] == ["terminal", "send"] for call in calls)
+
+    assert handle == "new-agent"
+    assert calls[0][calls[0].index("--command") + 1] == shlex.join(
+        [str(binary.resolve()), "--trust", "--yolo", "Continue the work."]
+    )
+    assert [call[1:3] for call in calls] == [["terminal", "create"]]
 
 
 def test_create_agent_terminal_rejects_an_unresolved_cursor_id() -> None:
@@ -1280,19 +1282,18 @@ def test_start_with_cursor_model_uses_terminal_command(tmp_path: Path) -> None:
             payload = {"ok": True, "result": {"send": {"accepted": True}}}
         return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
 
-    with pytest.raises(OrcaStartError, match="delivery_blocked"):
-        OrcaClient(
-            "orca-ide",
-            runner=runner,
-            which=lambda name: str(binary) if name == "cursor-agent" else None,
-        ).start(
-            tmp_path,
-            "example",
-            "single",
-            "cursor",
-            "Review the change.",
-            model="claude-opus-5-low",
-        )
+    OrcaClient(
+        "orca-ide",
+        runner=runner,
+        which=lambda name: str(binary) if name == "cursor-agent" else None,
+    ).start(
+        tmp_path,
+        "example",
+        "single",
+        "cursor",
+        "Review the change.",
+        model="claude-opus-5-low",
+    )
 
     create = next(call for call in calls if call[1:3] == ["worktree", "create"])
     command = next(call for call in calls if call[1:3] == ["terminal", "create"])
@@ -1304,6 +1305,7 @@ def test_start_with_cursor_model_uses_terminal_command(tmp_path: Path) -> None:
             "--yolo",
             "--model",
             "claude-opus-5-low",
+            "Review the change.",
         ]
     )
 
@@ -1523,3 +1525,75 @@ def test_integrate_worker_commit_aborts_a_merge_conflict_without_changing_head()
 
     assert aborted is True
     assert manager_head == "aaa111"
+
+
+def test_start_closes_the_default_terminal_orca_adds_to_the_new_worktree(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(arguments, **_kwargs):
+        calls.append(arguments)
+        operation = arguments[1:3]
+        if operation == ["worktree", "show"]:
+            return _missing_selector(arguments)
+        if operation == ["worktree", "create"]:
+            result = {"worktree": {"id": "repo::/tmp/custom", "path": "/tmp/custom"}}
+        elif operation == ["terminal", "list"]:
+            result = {"terminals": [{"handle": "default-terminal", "title": "Terminal 1"}]}
+        elif operation == ["terminal", "create"]:
+            result = {"terminal": {"handle": "agent-terminal"}}
+        else:
+            result = {"closed": True}
+        return subprocess.CompletedProcess(
+            arguments, 0, json.dumps({"ok": True, "result": result}), ""
+        )
+
+    OrcaClient("orca-ide", runner=runner, which=lambda name: f"/tmp/{name}").start(
+        tmp_path, "custom", "single", "codex", "Implement locally."
+    )
+
+    operations = [call[1:3] for call in calls]
+    close = calls[operations.index(["terminal", "close"])]
+    assert close[close.index("--terminal") + 1] == "default-terminal"
+    assert operations.index(["terminal", "close"]) < operations.index(["terminal", "create"])
+
+
+def test_default_terminal_is_polled_until_orca_adds_it(monkeypatch) -> None:
+    monkeypatch.setattr("flybridge_orca.client.BOOTSTRAP_TERMINAL_POLL_ATTEMPTS", 4)
+    listings = [[], [], [{"handle": "late-terminal"}]]
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def runner(arguments, **_kwargs):
+        calls.append(arguments)
+        result = (
+            {"terminals": listings.pop(0)}
+            if arguments[1:3] == ["terminal", "list"]
+            else {"closed": True}
+        )
+        return subprocess.CompletedProcess(
+            arguments, 0, json.dumps({"ok": True, "result": result}), ""
+        )
+
+    OrcaClient("orca-ide", runner=runner, sleep=sleeps.append)._close_default_terminals(
+        "repo::/tmp/custom"
+    )
+
+    assert len(sleeps) == 2
+    assert calls[-1][1:3] == ["terminal", "close"]
+    assert calls[-1][calls[-1].index("--terminal") + 1] == "late-terminal"
+
+
+def test_codex_resume_rejects_a_non_interactive_exec_preset() -> None:
+    presets = {
+        "default": AgentLaunchPreset(("{agent}",), (), ("--model", "{model}")),
+        "codex": AgentLaunchPreset(("codex",), ("exec",), ("--model", "{model}")),
+    }
+
+    with pytest.raises(UnresolvedAgentError, match="interactive launch preset"):
+        resolve_codex_resume_command(
+            "codex",
+            "12345678-1234-1234-1234-123456789abc",
+            "Continue.",
+            presets=presets,
+            which=lambda name: f"/opt/bin/{name}",
+        )

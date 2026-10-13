@@ -10,7 +10,7 @@
     },
     "codex": {
       "executables": ["codex"],
-      "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
+      "arguments": ["--dangerously-bypass-approvals-and-sandbox"],
       "model_arguments": ["--model", "{model}"],
       "prompt_arguments": ["{prompt}"],
       "builtin_tui": false,
@@ -28,6 +28,7 @@
       "executables": ["cursor-agent", "agent"],
       "arguments": ["--trust", "--yolo"],
       "model_arguments": ["--model", "{model}"],
+      "prompt_arguments": ["{prompt}"],
       "builtin_tui": true,
       "builtin_models": []
     },

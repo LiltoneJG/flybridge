@@ -47,11 +47,17 @@ class FixtureOrca:
         self.fail_status = False
         self.live = False
         self.before_remove = None
-        self.client = OrcaClient("fixture-orca", runner=self.run)
+        self.delayed_listings = 0
+        self.client = OrcaClient("fixture-orca", runner=self.run, sleep=lambda _seconds: None)
 
     def run(self, arguments, **kwargs):
         self.calls.append(arguments)
         if arguments[0] == "git":
+            if self.removal == "delayed" and "--porcelain" in arguments and "list" in arguments:
+                if self.delayed_listings == 0:
+                    git(self.repository, "worktree", "remove", str(self.worker))
+                else:
+                    self.delayed_listings -= 1
             if self.fail_status and "status" in arguments:
                 return subprocess.CompletedProcess(arguments, 1, "", "inspection failed")
             return subprocess.run(arguments, **kwargs)  # noqa: PLW1510 -- adapter supplies check=False
@@ -69,6 +75,8 @@ class FixtureOrca:
                 admin = Path(git(self.worker, "rev-parse", "--absolute-git-dir").strip())
                 assert admin.is_relative_to(self.repository)
                 admin.rename(self.repository / "saved-worker-admin")
+            if self.removal == "delayed":
+                self.delayed_listings = 1
             if self.removal == "complete":
                 args = ["worktree", "remove"]
                 if "--force" in arguments:
@@ -443,3 +451,27 @@ def test_remove_worktree_cli_requires_target_and_calls_only_explicit_path(
     )
     assert json.loads(capsys.readouterr().out)["state"] == "deleted"
     assert len(orca.removes) == 1
+
+
+def test_remove_worktree_waits_for_orca_to_finish_the_removal(checkout, monkeypatch):
+    repository, worker, sha = checkout
+    monkeypatch.setattr("flybridge_orca.client.REMOVAL_POLL_ATTEMPTS", 3)
+    orca = FixtureOrca(repository, worker)
+    orca.removal = "delayed"
+
+    orca.client.remove_worktree("repo::worker", expected_path=str(worker), expected_start_sha=sha)
+
+    assert not worker.exists()
+    assert len(orca.removes) == 1
+
+
+def test_remove_worktree_reports_a_removal_that_never_finishes(checkout, monkeypatch):
+    repository, worker, sha = checkout
+    monkeypatch.setattr("flybridge_orca.client.REMOVAL_POLL_ATTEMPTS", 2)
+    orca = FixtureOrca(repository, worker)
+    orca.removal = "metadata-only"
+
+    with pytest.raises(OrcaError, match="removal was incomplete"):
+        orca.client.remove_worktree(
+            "repo::worker", expected_path=str(worker), expected_start_sha=sha
+        )

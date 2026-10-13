@@ -150,6 +150,6 @@ def resolve_codex_resume_command(
     if Path(agent).name != "codex":
         raise UnresolvedAgentError("session resume is available only for Codex")
     command = shlex.split(resolve_launch_command(agent, model, presets=presets, which=which))
-    if len(command) < 2 or command[1] != "exec":
-        raise UnresolvedAgentError("Codex session resume requires an exec launch preset")
-    return shlex.join([command[0], "exec", "resume", *command[2:], session, prompt])
+    if len(command) >= 2 and command[1] == "exec":
+        raise UnresolvedAgentError("Codex session resume requires an interactive launch preset")
+    return shlex.join([command[0], "resume", *command[1:], session, prompt])
