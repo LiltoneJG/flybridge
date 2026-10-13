@@ -12,8 +12,8 @@
     // Set model to null to launch without specifying a model.
     // reviewer may be one value or a list.
     // To list available models:
-    // - Claude: (no official command)
     // - Codex: `codex debug models | jq -r '.models[].slug'`
+    // - Claude: (no official command; use an alias such as `opus`, or a full model ID)
     // - Cursor: `agent models`
     // - Antigravity: `agy models`
     "agents": {

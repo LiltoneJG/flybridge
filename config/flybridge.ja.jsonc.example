@@ -12,8 +12,8 @@
     // モデルを null にすると指定なしで起動します。
     // reviewer は単一または配列です。
     // モデル一覧確認方法：
-    // - Claude: （正式なコマンドなし）
     // - Codex: `codex debug models | jq -r '.models[].slug'`
+    // - Claude: （正式なコマンドなし。`opus` などの alias か完全な model ID を指定）
     // - Cursor: `agent models`
     // - Antigravity: `agy models`
     "agents": {

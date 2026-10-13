@@ -1,7 +1,7 @@
 """Orca client unit tests.
 
 Mock the Orca CLI runner and agent PATH resolution. Do not launch Orca or an
-LLM, and do not require `orca-ide`, `codex`, or `cursor-agent` on PATH.
+LLM, and do not require `orca-ide`, `codex`, `claude`, or `cursor-agent` on PATH.
 """
 
 from __future__ import annotations
@@ -332,6 +332,25 @@ def test_codex_prompt_command_quotes_prompt_for_one_shot_exec() -> None:
     ]
 
 
+def test_claude_prompt_command_starts_an_interactive_session_with_the_prompt() -> None:
+    prompt = "Implement 'this' safely; keep the spaces."
+    command = resolve_prompt_command(
+        "claude",
+        "opus",
+        prompt,
+        which=lambda name: f"/opt/bin/{name}",
+    )
+
+    assert command is not None
+    assert shlex.split(command) == [
+        "/opt/bin/claude",
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus",
+        prompt,
+    ]
+
+
 def test_local_launch_preset_can_override_cursor_arguments() -> None:
     presets = {
         "default": AgentLaunchPreset(("{agent}",), (), ("--model", "{model}")),
@@ -378,11 +397,11 @@ def test_new_non_codex_agent_uses_a_new_terminal_and_initial_prompt() -> None:
         OrcaClient(
             "orca-ide", runner=runner, which=lambda name: f"/tmp/{name}"
         ).create_new_agent_terminal(
-            "repo::/tmp/worktree", "/tmp/worktree", "claude", "Continue the work."
+            "repo::/tmp/worktree", "/tmp/worktree", "custom-agent", "Continue the work."
         )
 
     assert calls[0][1:3] == ["terminal", "create"]
-    assert calls[0][calls[0].index("--command") + 1] == str(Path("/tmp/claude").resolve())
+    assert calls[0][calls[0].index("--command") + 1] == str(Path("/tmp/custom-agent").resolve())
     assert calls[1][1:3] == ["terminal", "wait"]
     assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 
