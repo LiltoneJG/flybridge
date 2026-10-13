@@ -1,7 +1,7 @@
 """Orca client unit tests.
 
 Mock the Orca CLI runner and agent PATH resolution. Do not launch Orca or an
-LLM, and do not require `orca-ide`, `codex`, or `cursor-agent` on PATH.
+LLM, and do not require `orca-ide`, `codex`, `claude`, or `cursor-agent` on PATH.
 """
 
 from __future__ import annotations

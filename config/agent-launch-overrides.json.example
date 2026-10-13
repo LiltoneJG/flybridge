@@ -1,12 +1,13 @@
 {
     "version": 1,
     "agents": {
-        "cursor": {
-            "executables": ["cursor-agent", "agent"],
-            "arguments": ["--trust", "--yolo"],
+        "codex": {
+            "executables": ["codex"],
+            "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
             "model_arguments": ["--model", "{model}"],
-            "builtin_tui": true,
-            "builtin_models": ["auto"]
+            "prompt_arguments": ["{prompt}"],
+            "builtin_tui": false,
+            "builtin_models": []
         },
         "claude": {
             "executables": ["claude"],
@@ -15,13 +16,12 @@
             "builtin_tui": false,
             "builtin_models": []
         },
-        "codex": {
-            "executables": ["codex"],
-            "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
+        "cursor": {
+            "executables": ["cursor-agent", "agent"],
+            "arguments": ["--trust", "--yolo"],
             "model_arguments": ["--model", "{model}"],
-            "prompt_arguments": ["{prompt}"],
-            "builtin_tui": false,
-            "builtin_models": []
+            "builtin_tui": true,
+            "builtin_models": ["auto"]
         }
     }
 }
