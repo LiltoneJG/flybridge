@@ -100,6 +100,8 @@ def require_mock_orca_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
         original_popen(self, args, *positional, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen)
+    monkeypatch.setattr("flybridge_orca.client.BOOTSTRAP_TERMINAL_POLL_ATTEMPTS", 1)
+    monkeypatch.setattr("flybridge_orca.client.REMOVAL_POLL_ATTEMPTS", 1)
 
     def unavailable_runner(arguments, **kwargs):
         if arguments[0] == "git":
