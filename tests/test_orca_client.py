@@ -332,6 +332,25 @@ def test_codex_prompt_command_quotes_prompt_for_one_shot_exec() -> None:
     ]
 
 
+def test_claude_prompt_command_starts_an_interactive_session_with_the_prompt() -> None:
+    prompt = "Implement 'this' safely; keep the spaces."
+    command = resolve_prompt_command(
+        "claude",
+        "opus",
+        prompt,
+        which=lambda name: f"/opt/bin/{name}",
+    )
+
+    assert command is not None
+    assert shlex.split(command) == [
+        "/opt/bin/claude",
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus",
+        prompt,
+    ]
+
+
 def test_local_launch_preset_can_override_cursor_arguments() -> None:
     presets = {
         "default": AgentLaunchPreset(("{agent}",), (), ("--model", "{model}")),

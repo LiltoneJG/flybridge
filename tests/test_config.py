@@ -452,6 +452,7 @@ def test_default_agent_launch_presets_are_loaded_from_packaged_file(tmp_path: Pa
     assert claude.executables == ("claude",)
     assert claude.arguments == ("--dangerously-skip-permissions",)
     assert claude.model_arguments == ("--model", "{model}")
+    assert claude.prompt_arguments == ("{prompt}",)
     assert not claude.builtin_tui
     assert codex.arguments == ("exec", "--dangerously-bypass-approvals-and-sandbox")
     assert codex.prompt_arguments == ("{prompt}",)

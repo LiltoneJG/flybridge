@@ -20,6 +20,7 @@
       "executables": ["claude"],
       "arguments": ["--dangerously-skip-permissions"],
       "model_arguments": ["--model", "{model}"],
+      "prompt_arguments": ["{prompt}"],
       "builtin_tui": false,
       "builtin_models": []
     },
