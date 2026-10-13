@@ -378,11 +378,11 @@ def test_new_non_codex_agent_uses_a_new_terminal_and_initial_prompt() -> None:
         OrcaClient(
             "orca-ide", runner=runner, which=lambda name: f"/tmp/{name}"
         ).create_new_agent_terminal(
-            "repo::/tmp/worktree", "/tmp/worktree", "claude", "Continue the work."
+            "repo::/tmp/worktree", "/tmp/worktree", "custom-agent", "Continue the work."
         )
 
     assert calls[0][1:3] == ["terminal", "create"]
-    assert calls[0][calls[0].index("--command") + 1] == str(Path("/tmp/claude").resolve())
+    assert calls[0][calls[0].index("--command") + 1] == str(Path("/tmp/custom-agent").resolve())
     assert calls[1][1:3] == ["terminal", "wait"]
     assert not any(call[1:3] == ["terminal", "send"] for call in calls)
 

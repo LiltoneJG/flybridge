@@ -23,6 +23,13 @@
       "builtin_tui": false,
       "builtin_models": []
     },
+    "claude": {
+      "executables": ["claude"],
+      "arguments": ["--dangerously-skip-permissions"],
+      "model_arguments": ["--model", "{model}"],
+      "builtin_tui": false,
+      "builtin_models": []
+    },
     "ollama": {
       "executables": ["ollama"],
       "arguments": ["run"],

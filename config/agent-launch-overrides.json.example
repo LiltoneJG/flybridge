@@ -8,6 +8,13 @@
             "builtin_tui": true,
             "builtin_models": ["auto"]
         },
+        "claude": {
+            "executables": ["claude"],
+            "arguments": ["--dangerously-skip-permissions"],
+            "model_arguments": ["--model", "{model}"],
+            "builtin_tui": false,
+            "builtin_models": []
+        },
         "codex": {
             "executables": ["codex"],
             "arguments": ["exec", "--dangerously-bypass-approvals-and-sandbox"],

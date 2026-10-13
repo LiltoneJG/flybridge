@@ -445,9 +445,14 @@ def test_default_agent_launch_presets_are_loaded_from_packaged_file(tmp_path: Pa
     config = load_config(write_config(tmp_path / "flybridge.json", orca={"agents": {}}))
 
     cursor = config.agent_launch_presets["cursor"]
+    claude = config.agent_launch_presets["claude"]
     codex = config.agent_launch_presets["codex"]
     assert cursor.arguments == ("--trust", "--yolo")
     assert cursor.model_arguments == ("--model", "{model}")
+    assert claude.executables == ("claude",)
+    assert claude.arguments == ("--dangerously-skip-permissions",)
+    assert claude.model_arguments == ("--model", "{model}")
+    assert not claude.builtin_tui
     assert codex.arguments == ("exec", "--dangerously-bypass-approvals-and-sandbox")
     assert codex.prompt_arguments == ("{prompt}",)
 
