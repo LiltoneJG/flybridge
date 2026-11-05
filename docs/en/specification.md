@@ -94,6 +94,10 @@ stateDiagram-v2
 - A prompt receives a local document index, never the contents of private skill documents. The agent is instructed to read applicable documents at those paths and not copy their contents into a repository without user direction.
 - Every role required by the selected mode has an explicitly configured Orca agent. Flybridge does not silently choose an agent.
 
+## Reliability trial
+
+Changes to supervision or recovery are evaluated with the [bounded reliability trial](reliability-trial.md). Raw operational records and generated aggregates remain local; only a reviewed, non-sensitive summary belongs in the tracking issue.
+
 ## Resource queue contract
 
 For each resource name, Flybridge maintains a durable first-in, first-out queue. A request is identified by a generated request identifier and its workflow owner ID.

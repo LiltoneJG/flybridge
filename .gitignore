@@ -13,6 +13,7 @@ dist/
 *.sqlite3-shm
 *.log
 /results.sarif
+/.reliability-trials/
 /.private-audit.yaml
 .agents/
 .claude/
