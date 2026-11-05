@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 from flybridge_application import WorkflowService
-from flybridge_core import ReconcileStore, ResourceQueue, WorkflowArtifactStore, WorkflowStore
+from flybridge_core import (
+    ReconcileStore,
+    ResourceQueue,
+    WorkflowArtifactStore,
+    WorkflowRole,
+    WorkflowStore,
+)
 from flybridge_core.workflows import SCHEMA_VERSION
 from flybridge_orca.client import OrcaStartError, OrcaTimeoutError
 
@@ -231,6 +237,61 @@ def test_role_ready_requires_worker_commit_and_reviewer_outcome(tmp_path: Path) 
         service.role_ready(worker.id, Runtime(), summary="Ready for review.")
     with pytest.raises(ValueError, match="requires approved or changes-requested"):
         service.role_ready(reviewer.id, Runtime(), summary="Reviewed.")
+
+
+@pytest.mark.parametrize("role", [WorkflowRole.MANAGER, WorkflowRole.WORKER, WorkflowRole.REVIEWER])
+def test_blocked_role_ready_skips_success_git_gate_but_keeps_identity_and_artifact_validation(
+    tmp_path: Path, role: WorkflowRole
+) -> None:
+    store = WorkflowStore(tmp_path)
+    service = WorkflowService(store)
+    manager, worker, reviewer = store.create_orchestrated_plan(
+        tmp_path, "blocked-dirty", "Implement."
+    )
+    workflow = {
+        WorkflowRole.MANAGER: manager,
+        WorkflowRole.WORKER: worker,
+        WorkflowRole.REVIEWER: reviewer,
+    }[role]
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference=f"repo::{role.value}",
+        worktree_path=f"/tmp/{role.value}",
+        terminal_handle=f"{role.value}-terminal",
+        implementation_repository="example/repo",
+        runtime_repository_id="repo",
+        start_sha="start",
+    )
+    store.transition(workflow.id, "running")
+    artifact_kind = {
+        WorkflowRole.MANAGER: "plan",
+        WorkflowRole.WORKER: "verification",
+        WorkflowRole.REVIEWER: "review",
+    }[role]
+    service.put_artifact(workflow.id, artifact_kind, "Verified scope and unresolved blocker.")
+    calls: list[str] = []
+
+    class Runtime:
+        def verify_implementation_identity(self, *_args) -> None:
+            calls.append("identity")
+
+        def verify_worker_ready(self, *_args) -> None:
+            raise AssertionError("blocked readiness must not require a worker success gate")
+
+        def verify_pristine_start(self, *_args) -> None:
+            raise AssertionError("blocked readiness must not require a pristine success gate")
+
+    readiness = service.role_ready(
+        workflow.id,
+        Runtime(),
+        summary="Required environment is unavailable.",
+        outcome="blocked",
+    )
+
+    assert calls == ["identity"]
+    assert readiness.blocked_reason == "Required environment is unavailable."
+    assert readiness.outcome is None
 
 
 def test_role_ready_rejects_single_workflows_before_runtime_verification(tmp_path: Path) -> None:

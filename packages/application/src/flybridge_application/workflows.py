@@ -420,12 +420,17 @@ class WorkflowService:
             WorkflowRole.REVIEWER: "review",
         }[workflow.role]
         artifact, artifact_content = self.artifacts.read(workflow.id, kind)
-        if workflow.role == WorkflowRole.WORKER:
-            runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
-        else:
-            runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
         blocked_reason = summary if outcome == "blocked" else None
         reviewer_outcome = None if outcome == "blocked" else outcome
+        # A declared blocker is evidence that the role cannot satisfy its success
+        # gate.  Keep ownership, persisted-identity, artifact, attempt and queue
+        # validation, but do not make a clean/committed success state a
+        # prerequisite for recording why work stopped.
+        if blocked_reason is None:
+            if workflow.role == WorkflowRole.WORKER:
+                runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
+            else:
+                runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
         return self.store.record_role_readiness(
             workflow.id,
             summary=summary,
