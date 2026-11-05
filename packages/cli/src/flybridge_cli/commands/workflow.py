@@ -1599,6 +1599,11 @@ def handle(args: argparse.Namespace) -> int:
                         if (execution_result := store.execution_result(workflow.id)) is None
                         else asdict(execution_result)
                     ),
+                    "execution_boundary": (
+                        None
+                        if (boundary := store.execution_boundary(workflow.id)) is None
+                        else asdict(boundary)
+                    ),
                     "single_report": BatchStore(config.state_dir).single_report(workflow.id),
                     "owner_agent_state": _owner_terminal_state(workflow, client),
                     "prompt_delivery": {

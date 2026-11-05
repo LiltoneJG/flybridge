@@ -32,6 +32,7 @@ from .types import (
 from .workflows import (
     AdapterReferenceConflict,
     ContinuationSnapshot,
+    ExecutionBoundary,
     ExecutionResult,
     LifecycleOperationConflict,
     OrchestrationRun,
@@ -54,6 +55,7 @@ __all__ = [
     "BatchStore",
     "ConfigError",
     "ContinuationSnapshot",
+    "ExecutionBoundary",
     "ExecutionResult",
     "GitHubIssueRef",
     "LifecycleOperationConflict",

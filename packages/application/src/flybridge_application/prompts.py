@@ -42,6 +42,20 @@ ROLE_RESPONSIBILITIES = {
     ),
 }
 
+ROLE_AUTHORITIES = {
+    WorkflowRole.SINGLE: "Implement, validate, review, and report only this assigned objective.",
+    WorkflowRole.MANAGER: "Plan acceptance criteria and verification for this run only.",
+    WorkflowRole.WORKER: "Modify and verify implementation only in the assigned worktree.",
+    WorkflowRole.REVIEWER: "Inspect and decide only on the recorded reviewed SHA.",
+}
+
+ROLE_PROHIBITIONS = {
+    WorkflowRole.SINGLE: "Do not create nested Flybridge managers or workers.",
+    WorkflowRole.MANAGER: "Do not implement, delegate, create agents, or start nested workflows.",
+    WorkflowRole.WORKER: "Do not create managers, workers, agents, or nested workflows.",
+    WorkflowRole.REVIEWER: "Do not modify implementation or create agents or nested workflows.",
+}
+
 OPERATOR_GUIDANCE = (
     "Read the routing skill first, then read and follow every applicable operator skill "
     "document. Decide workflow-wide operational constraints once, and pass roles only the "
@@ -375,6 +389,8 @@ def render_start_prompt(
     task_type: TaskType = TaskType.IMPLEMENTATION,
 ) -> str:
     """Render the stable English prompt without copying private skill content."""
+    mode = WorkflowMode(mode)
+    role = WorkflowRole(role)
     if not objective.strip():
         raise ValueError("workflow objective is required")
     if not response_language.strip() or "\n" in response_language:
@@ -424,6 +440,12 @@ Resource coordination:
     return f"""You are the {role} role in a {mode} Flybridge workflow.
 
 Task type: {task_type.value}. {task_guidance}
+Execution boundary:
+- Applied role: {role.value}
+- Applied skill index: the exact external paths listed below; refresh them on every resume.
+- Acceptance source: the objective and any durable manager-plan / verification artifacts below.
+- Authority: {ROLE_AUTHORITIES[role]}
+- Prohibitions: {ROLE_PROHIBITIONS[role]}
 
 Role responsibility: {ROLE_RESPONSIBILITIES[role]}
 Operator lifecycle: {_operator_lifecycle(role, workflow_id, config_path)}
@@ -470,6 +492,7 @@ def render_resume_prompt(
     continuation_context: str | None = None,
 ) -> str:
     """Render concise restart context without embedding private skill content."""
+    role = WorkflowRole(role)
     if not objective.strip():
         raise ValueError("workflow objective is required")
     if not response_language.strip() or "\n" in response_language:
@@ -516,6 +539,9 @@ def render_resume_prompt(
     return (
         f"Resume the persisted Flybridge workflow as the {role.value} role. "
         f"Task type: {task_type.value}. {_task_type_guidance(task_type)}{continuation} "
+        f"Execution boundary: applied role={role.value}; applied skill index={skills}; "
+        f"acceptance source=objective and durable role artifacts; "
+        f"authority={ROLE_AUTHORITIES[role]}; prohibitions={ROLE_PROHIBITIONS[role]} "
         f"Continue this objective: {objective.strip()} "
         f"Role responsibility: {ROLE_RESPONSIBILITIES[role]} "
         f"Operator lifecycle: {_operator_lifecycle(role, workflow_id, config_path)}{branch_continuity} "

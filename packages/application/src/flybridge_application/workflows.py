@@ -28,7 +28,12 @@ from flybridge_core import (
 )
 
 from .git_probe import GitProbeError, GitWorktreeProbe
-from .prompts import render_resume_prompt, render_start_prompt
+from .prompts import (
+    ROLE_AUTHORITIES,
+    ROLE_PROHIBITIONS,
+    render_resume_prompt,
+    render_start_prompt,
+)
 from .runtime import WorkflowRuntime
 
 ROLE_PLAN = (WorkflowRole.MANAGER, WorkflowRole.WORKER, WorkflowRole.REVIEWER)
@@ -569,6 +574,24 @@ class WorkflowService:
             next_action=next_action,
         )
 
+    def _record_execution_boundary(self, workflow_id: str, skill_paths: tuple[Path, ...]) -> None:
+        workflow = self.store.get(workflow_id)
+        if not workflow.terminal_handle:
+            raise ValueError("execution boundary requires an owned agent terminal")
+        evidence = ["objective"]
+        evidence.extend(
+            f"{artifact.kind}:{artifact.sha256}"
+            for artifact in self.artifacts.list_for_workflow(workflow.id)
+        )
+        self.store.record_execution_boundary(
+            workflow.id,
+            terminal_handle=workflow.terminal_handle,
+            skill_paths=tuple(str(path) for path in skill_paths),
+            acceptance_evidence=tuple(evidence),
+            authority=(ROLE_AUTHORITIES[workflow.role],),
+            prohibitions=(ROLE_PROHIBITIONS[workflow.role],),
+        )
+
     def _artifact_prompt_context(
         self, workflow: WorkflowRecord
     ) -> tuple[str | None, str | None, str | None]:
@@ -723,6 +746,7 @@ class WorkflowService:
         if observer_command is not None:
             self.attach_observer(started.id, runtime, observer_command)
             started = self.store.get(started.id)
+        self._record_execution_boundary(started.id, skill_paths)
         return started
 
     @staticmethod
@@ -822,7 +846,9 @@ class WorkflowService:
                 self._discard_unowned_terminal(runtime, workflow.adapter_reference, replacement)
                 raise
             self.store.record_agent_run(workflow.id, agent, replacement, model=model)
-            return self._after_resume(workflow.id, runtime, observer_command, observer_enabled)
+            return self._after_resume(
+                workflow.id, runtime, observer_command, observer_enabled, skill_paths
+            )
         terminal_handle = workflow.terminal_handle
         if not runtime.terminal_is_valid(workflow.adapter_reference, terminal_handle):
             if workflow.mode == WorkflowMode.SINGLE:
@@ -845,7 +871,9 @@ class WorkflowService:
                 else self.store.mark_resumed(workflow.id)
             )
             self.store.record_agent_run(resumed.id, agent, replacement, model=model)
-            return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
+            return self._after_resume(
+                resumed.id, runtime, observer_command, observer_enabled, skill_paths
+            )
         if not terminal_handle:
             raise ValueError("running workflow has no resumable agent terminal")
         preflight = getattr(runtime, "check_prompt_delivery", None)
@@ -860,7 +888,9 @@ class WorkflowService:
             else self.store.mark_resumed(workflow.id)
         )
         self.store.record_agent_run(resumed.id, agent, terminal_handle, model=model)
-        return self._after_resume(resumed.id, runtime, observer_command, observer_enabled)
+        return self._after_resume(
+            resumed.id, runtime, observer_command, observer_enabled, skill_paths
+        )
 
     def _after_resume(
         self,
@@ -868,11 +898,13 @@ class WorkflowService:
         runtime: WorkflowRuntime,
         observer_command: str | None,
         observer_enabled: bool | None,
+        skill_paths: tuple[Path, ...],
     ) -> WorkflowRecord:
         resumed = self.store.get(workflow_id)
         if observer_enabled is not None:
             resumed = self.store.set_queue_observer_enabled(resumed.id, observer_enabled)
         self._ensure_observer(resumed.id, runtime, observer_command)
+        self._record_execution_boundary(resumed.id, skill_paths)
         return self.store.get(resumed.id)
 
     def restart_with_new_agent(
@@ -946,6 +978,7 @@ class WorkflowService:
         if observer_enabled is not None:
             restarted = self.store.set_queue_observer_enabled(restarted.id, observer_enabled)
         self._ensure_observer(restarted.id, runtime, observer_command)
+        self._record_execution_boundary(restarted.id, skill_paths)
         return self.store.get(restarted.id)
 
     def _handoff_summary(self, workflow: WorkflowRecord) -> str | None:

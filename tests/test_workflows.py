@@ -315,6 +315,62 @@ def test_continuation_snapshot_preserves_existing_state_and_next_action(tmp_path
     assert snapshot.next_action == "Finish the remaining repair."
 
 
+def test_execution_boundary_refreshes_skills_and_binds_reviewed_sha(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    _manager, _worker, reviewer = store.create_orchestrated_plan(
+        tmp_path, "boundary", "Review the change."
+    )
+    store.begin_start(reviewer.id)
+    store.attach_external(
+        reviewer.id,
+        adapter_reference="repo::reviewer",
+        worktree_path="/tmp/reviewer",
+        terminal_handle="reviewer-terminal",
+        start_sha="reviewed-sha",
+    )
+    store.transition(reviewer.id, "running")
+
+    first = store.record_execution_boundary(
+        reviewer.id,
+        terminal_handle="reviewer-terminal",
+        skill_paths=("/skills/review.md",),
+        acceptance_evidence=("objective", "verification:abc"),
+        authority=("Review the recorded SHA.",),
+        prohibitions=("Do not modify implementation.",),
+    )
+    refreshed = store.record_execution_boundary(
+        reviewer.id,
+        terminal_handle="reviewer-terminal",
+        skill_paths=("/skills/review.md", "/skills/security.md"),
+        acceptance_evidence=("objective", "verification:abc"),
+        authority=("Review the recorded SHA.",),
+        prohibitions=("Do not modify implementation.",),
+    )
+
+    assert first.generation == 1
+    assert refreshed.generation == 2
+    assert refreshed.skill_paths == ("/skills/review.md", "/skills/security.md")
+    assert refreshed.reviewed_sha == "reviewed-sha"
+    assert refreshed.role == "reviewer"
+
+
+def test_worker_cannot_create_recursive_role_children(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    _manager, worker, _reviewer = store.create_orchestrated_plan(
+        tmp_path, "no-nesting", "Implement."
+    )
+
+    with pytest.raises(ValueError, match="orchestrated manager"):
+        store.create(
+            tmp_path,
+            "orchestrated",
+            "nested-worker",
+            "Nested work.",
+            role=WorkflowRole.WORKER,
+            parent_id=worker.id,
+        )
+
+
 @pytest.mark.parametrize("role", [WorkflowRole.MANAGER, WorkflowRole.WORKER, WorkflowRole.REVIEWER])
 def test_blocked_role_ready_skips_success_git_gate_but_keeps_identity_and_artifact_validation(
     tmp_path: Path, role: WorkflowRole
