@@ -106,14 +106,27 @@ class ResourceQueue:
             ).fetchone()
             if finishing is not None:
                 raise ValueError("queue owner has a lifecycle operation in progress")
+            workflow_owner = connection.execute(
+                "SELECT attempt, terminal_handle FROM workflows WHERE id = ?", (owner,)
+            ).fetchone()
+            owner_attempt = None if workflow_owner is None else int(workflow_owner["attempt"])
+            owner_terminal_handle = (
+                None if workflow_owner is None else workflow_owner["terminal_handle"]
+            )
             existing = connection.execute(
                 """
-                SELECT id, status, created_at FROM queue_requests
+                SELECT id, status, created_at, owner_attempt, owner_terminal_handle
+                FROM queue_requests
                 WHERE resource = ? AND owner = ? AND status IN ('waiting', 'leased')
                 """,
                 (resource, owner),
             ).fetchone()
             if existing is not None:
+                if workflow_owner is not None and (
+                    existing["owner_attempt"],
+                    existing["owner_terminal_handle"],
+                ) != (owner_attempt, owner_terminal_handle):
+                    raise ValueError("active resource request belongs to another activation")
                 request_id = str(existing["id"])
                 job = connection.execute(
                     "SELECT argv_json, cleanup_check, worktree_path FROM queue_jobs "
@@ -163,8 +176,18 @@ class ResourceQueue:
             ).fetchone()
             status = QueueRequestStatus.WAITING if active or blocked else QueueRequestStatus.LEASED
             connection.execute(
-                "INSERT INTO queue_requests VALUES (?, ?, ?, ?, ?, ?)",
-                (request_id, resource, owner, now, now, status.value),
+                "INSERT INTO queue_requests(id, resource, owner, created_at, updated_at, status, "
+                "owner_attempt, owner_terminal_handle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    request_id,
+                    resource,
+                    owner,
+                    now,
+                    now,
+                    status.value,
+                    owner_attempt,
+                    owner_terminal_handle,
+                ),
             )
             if status == QueueRequestStatus.WAITING:
                 connection.execute(
@@ -289,21 +312,36 @@ class ResourceQueue:
                 return None
             return self._promote(connection, str(row["resource"]))
 
-    def cancel_owner(self, owner: str) -> list[str]:
-        """Cancel every active request for one workflow owner."""
+    def cancel_owner(
+        self,
+        owner: str,
+        *,
+        expected_attempt: int | None = None,
+        expected_terminal_handle: str | None = None,
+    ) -> list[str]:
+        """Cancel active requests, optionally bound to one workflow activation."""
         if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
         owner = owner.strip()
         promoted: list[str] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            scope = ""
+            params: list[object] = [owner]
+            if expected_attempt is not None:
+                scope += " AND owner_attempt = ?"
+                params.append(expected_attempt)
+            if expected_terminal_handle is not None:
+                scope += " AND owner_terminal_handle = ?"
+                params.append(expected_terminal_handle)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, resource, status FROM queue_requests
                 WHERE owner = ? AND status IN ('waiting', 'leased')
+                {scope}
                 ORDER BY created_at, id
                 """,
-                (owner,),
+                tuple(params),
             ).fetchall()
             for row in rows:
                 request_id, resource = str(row["id"]), str(row["resource"])

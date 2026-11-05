@@ -87,13 +87,23 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _cancel_queue_owners(connection: sqlite3.Connection, owners: list[str]) -> None:
+def _cancel_queue_owners(
+    connection: sqlite3.Connection,
+    owners: list[str],
+    *,
+    activation: tuple[int, str | None] | None = None,
+) -> None:
     """Cancel queue ownership and promote FIFO successors in the caller's transaction."""
     for owner in owners:
+        scope = ""
+        params: list[object] = [owner]
+        if activation is not None:
+            scope = " AND owner_attempt = ? AND owner_terminal_handle IS ?"
+            params.extend(activation)
         rows = connection.execute(
             "SELECT id, resource, status FROM queue_requests WHERE owner=? "
-            "AND status IN ('waiting','leased') ORDER BY created_at, id",
-            (owner,),
+            f"AND status IN ('waiting','leased'){scope} ORDER BY created_at, id",
+            tuple(params),
         ).fetchall()
         for row in rows:
             connection.execute(
@@ -646,7 +656,7 @@ class WorkflowStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM workflows WHERE id = ?", (workflow_id,)
+                "SELECT status, attempt FROM workflows WHERE id = ?", (workflow_id,)
             ).fetchone()
             if row is None:
                 raise ValueError("workflow was not found")
@@ -692,8 +702,10 @@ class WorkflowStore:
             except sqlite3.IntegrityError as exc:
                 raise AdapterReferenceConflict("Orca worktree reference is already owned") from exc
             connection.execute(
-                "INSERT OR IGNORE INTO owned_terminals VALUES (?, ?, 'agent', ?)",
-                (workflow_id, terminal_handle, _now()),
+                "INSERT OR IGNORE INTO owned_terminals("
+                "workflow_id, handle, kind, created_at, attempt, activation_handle"
+                ") VALUES (?, ?, 'agent', ?, ?, ?)",
+                (workflow_id, terminal_handle, _now(), int(row["attempt"]), terminal_handle),
             )
             connection.execute(
                 "INSERT INTO worktrees(orca_id, path, ownership, presence) "
@@ -724,7 +736,8 @@ class WorkflowStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM workflows WHERE id = ?", (workflow_id,)
+                "SELECT status, attempt, terminal_handle FROM workflows WHERE id = ?",
+                (workflow_id,),
             ).fetchone()
             if row is None or row["status"] != WorkflowStatus.STARTING.value:
                 raise ValueError("partial external metadata can only attach while starting")
@@ -773,7 +786,8 @@ class WorkflowStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM workflows WHERE id = ?", (workflow_id,)
+                "SELECT status, attempt, terminal_handle FROM workflows WHERE id = ?",
+                (workflow_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("workflow was not found")
@@ -796,9 +810,12 @@ class WorkflowStore:
                     raise LifecycleOperationConflict(
                         "queue observer is already owned by this workflow", kind="observer"
                     )
+            activation_handle = handle if kind == "agent" else row["terminal_handle"]
             connection.execute(
-                "INSERT OR IGNORE INTO owned_terminals VALUES (?, ?, ?, ?)",
-                (workflow_id, handle, kind, _now()),
+                "INSERT OR IGNORE INTO owned_terminals("
+                "workflow_id, handle, kind, created_at, attempt, activation_handle"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (workflow_id, handle, kind, _now(), int(row["attempt"]), activation_handle),
             )
             if kind == "observer":
                 connection.execute(
@@ -862,9 +879,14 @@ class WorkflowStore:
                 "DELETE FROM owned_terminals WHERE workflow_id = ? AND kind = 'observer'",
                 (workflow_id,),
             )
+            attempt = connection.execute(
+                "SELECT attempt FROM workflows WHERE id = ?", (workflow_id,)
+            ).fetchone()["attempt"]
             connection.execute(
-                "INSERT INTO owned_terminals VALUES (?, ?, 'agent', ?)",
-                (workflow_id, replacement_handle, _now()),
+                "INSERT INTO owned_terminals("
+                "workflow_id, handle, kind, created_at, attempt, activation_handle"
+                ") VALUES (?, ?, 'agent', ?, ?, ?)",
+                (workflow_id, replacement_handle, _now(), int(attempt), replacement_handle),
             )
             updated = connection.execute(
                 "UPDATE workflows SET terminal_handle = ?, updated_at = ? "
@@ -875,23 +897,50 @@ class WorkflowStore:
                 raise ValueError("agent terminal ownership changed during resume")
         return self.get(workflow_id)
 
-    def owned_terminal_handles(self, workflow_id: str, *, kind: str | None = None) -> list[str]:
+    def owned_terminal_handles(
+        self,
+        workflow_id: str,
+        *,
+        kind: str | None = None,
+        expected_attempt: int | None = None,
+        expected_activation_handle: str | None = None,
+    ) -> list[str]:
         with self._connect() as connection:
-            if kind is None:
-                rows = connection.execute(
-                    "SELECT handle FROM owned_terminals WHERE workflow_id = ? ORDER BY created_at, handle",
-                    (workflow_id,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT handle FROM owned_terminals
-                    WHERE workflow_id = ? AND kind = ?
-                    ORDER BY created_at, handle
-                    """,
-                    (workflow_id, kind),
-                ).fetchall()
+            clauses = ["workflow_id = ?"]
+            params: list[object] = [workflow_id]
+            if kind is not None:
+                clauses.append("kind = ?")
+                params.append(kind)
+            if expected_attempt is not None:
+                clauses.append("attempt = ?")
+                params.append(expected_attempt)
+            if expected_activation_handle is not None:
+                clauses.append("activation_handle = ?")
+                params.append(expected_activation_handle)
+            rows = connection.execute(
+                "SELECT handle FROM owned_terminals WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at, handle",
+                tuple(params),
+            ).fetchall()
         return [str(row["handle"]) for row in rows]
+
+    def forget_owned_terminal(
+        self,
+        workflow_id: str,
+        handle: str,
+        *,
+        expected_attempt: int,
+        expected_activation_handle: str,
+    ) -> bool:
+        """Release exactly one terminal from the activation that closed it."""
+        with self._connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM owned_terminals WHERE workflow_id = ? AND handle = ? "
+                "AND attempt = ? AND activation_handle = ?",
+                (workflow_id, handle, expected_attempt, expected_activation_handle),
+            )
+        return deleted.rowcount == 1
 
     def set_queue_observer_enabled(self, workflow_id: str, enabled: bool) -> WorkflowRecord:
         """Update the observer policy for an existing running workflow."""
@@ -1243,6 +1292,7 @@ class WorkflowStore:
             ).fetchone()
             if row is None:
                 raise ValueError("workflow was not found")
+            workflow = self._record(row)
             current = WorkflowStatus(row["status"])
             if target not in TRANSITIONS[current]:
                 raise ValueError(f"cannot transition workflow from {current} to {target}")
@@ -1263,7 +1313,11 @@ class WorkflowStore:
                 WorkflowStatus.FAILED,
                 WorkflowStatus.CANCELLED,
             }:
-                _cancel_queue_owners(connection, [workflow_id])
+                _cancel_queue_owners(
+                    connection,
+                    [workflow_id],
+                    activation=(workflow.attempt, workflow.terminal_handle),
+                )
         return self.get(workflow_id)
 
     def claim_activation(self, workflow_id: str) -> str:
@@ -1601,7 +1655,8 @@ class WorkflowStore:
                 (workflow_id,),
             ).fetchone()
             row = connection.execute(
-                "SELECT status FROM workflows WHERE id = ?", (workflow_id,)
+                "SELECT status, attempt, terminal_handle FROM workflows WHERE id = ?",
+                (workflow_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("workflow was not found")
@@ -1648,11 +1703,20 @@ class WorkflowStore:
                         f"WHERE id IN ({placeholders})",
                         (_now(), *successor_ids),
                     )
-                _cancel_queue_owners(connection, [workflow_id, *successor_ids])
+                _cancel_queue_owners(
+                    connection,
+                    [workflow_id],
+                    activation=(int(row["attempt"]), row["terminal_handle"]),
+                )
+                _cancel_queue_owners(connection, successor_ids)
             else:
                 # A role must never leave a live lease behind after terminal completion.
                 # Unknown external cleanup remains represented by a resource block.
-                _cancel_queue_owners(connection, [workflow_id])
+                _cancel_queue_owners(
+                    connection,
+                    [workflow_id],
+                    activation=(int(row["attempt"]), row["terminal_handle"]),
+                )
             connection.execute(
                 "UPDATE agent_runs SET status=?, ended_at=? WHERE step_id=? AND status='running'",
                 (target.value, _now(), workflow_id),
@@ -2949,6 +3013,7 @@ class WorkflowStore:
                 "updated_at = ? WHERE id = ?",
                 (_now(), _now(), workflow_id),
             )
+            connection.execute("DELETE FROM owned_terminals WHERE workflow_id = ?", (workflow_id,))
             connection.execute(
                 "DELETE FROM workflow_lifecycle_operations WHERE workflow_id = ?",
                 (workflow_id,),

@@ -98,6 +98,33 @@ def test_owner_requests_lists_waiting_and_leased_rows(tmp_path: Path) -> None:
     assert waiter_rows[0]["lease_id"] is None
 
 
+def test_activation_scoped_cancel_does_not_release_an_older_attempt(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    workflow = store.create(tmp_path, "single", "scoped-owner", "Run checks.")
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference="repo::owner",
+        worktree_path="/tmp/owner",
+        terminal_handle="term-1",
+    )
+    store.transition(workflow.id, "running")
+    queue = ResourceQueue(tmp_path)
+    old = queue.acquire("old-resource", workflow.id)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE workflows SET attempt=2, terminal_handle='term-2' WHERE id=?", (workflow.id,)
+        )
+    with pytest.raises(ValueError, match="another activation"):
+        queue.acquire("old-resource", workflow.id)
+    current = queue.acquire("current-resource", workflow.id)
+
+    queue.cancel_owner(workflow.id, expected_attempt=2, expected_terminal_handle="term-2")
+
+    assert queue.inspect(current.request_id)["status"] == "cancelled"
+    assert queue.inspect(old.request_id)["status"] == "leased"
+
+
 def test_simultaneous_queue_acquire_grants_exactly_one_lease(tmp_path: Path) -> None:
     queue = ResourceQueue(tmp_path)
     barrier = threading.Barrier(8, timeout=5)

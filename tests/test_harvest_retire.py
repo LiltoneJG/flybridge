@@ -107,6 +107,52 @@ def test_retire_keep_manager_closes_children_only(tmp_path: Path) -> None:
     assert "repo::manager" not in runtime.removed
 
 
+def test_role_resource_shutdown_is_replay_safe_and_releases_active_ownership(
+    tmp_path: Path,
+) -> None:
+    service, _manager, worker, _reviewer = _finished_plan(tmp_path)
+    worker = service.store.get(worker.id)
+    runtime = RecordingRuntime()
+
+    first = service.stop_role_resources(worker, runtime, dry_run=False)
+    second = service.stop_role_resources(worker, runtime, dry_run=False)
+
+    assert first == (("repo::worker", "term-worker"),)
+    assert second == ()
+    assert runtime.closed == [("repo::worker", "term-worker")]
+    assert service.store.owned_terminal_handles(worker.id) == []
+    assert service.store.get(worker.id).external_reconciled_at is not None
+    assert service.store.retained_worktrees(worker.id)[0]["state"] == "retained"
+
+
+def test_interrupted_terminal_shutdown_retries_only_unfinished_owned_handles(
+    tmp_path: Path,
+) -> None:
+    service, _manager, worker, _reviewer = _finished_plan(tmp_path)
+    worker = service.store.get(worker.id)
+    service.store.add_owned_terminal(worker.id, "observer-worker", "observer")
+
+    class InterruptingRuntime(RecordingRuntime):
+        fail_once = True
+
+        def close_terminals(self, worktree_id: str, handle: str | None = None) -> dict[str, bool]:
+            self.closed.append((worktree_id, handle))
+            if handle == "term-worker" and self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("interrupted")
+            return {"closed": True}
+
+    runtime = InterruptingRuntime()
+    with pytest.raises(RuntimeError, match="interrupted"):
+        service.stop_role_resources(worker, runtime, dry_run=False)
+
+    assert service.store.owned_terminal_handles(worker.id) == ["term-worker"]
+    service.stop_role_resources(worker, runtime, dry_run=False)
+    assert runtime.closed.count(("repo::worker", "observer-worker")) == 1
+    assert runtime.closed.count(("repo::worker", "term-worker")) == 2
+    assert service.store.owned_terminal_handles(worker.id) == []
+
+
 def test_retire_keep_none_does_not_delete_attached_manager(tmp_path: Path) -> None:
     service, manager, _worker, _reviewer = _finished_plan(tmp_path, manager_owns=False)
     runtime = RecordingRuntime()
