@@ -184,7 +184,11 @@ class WorkflowService:
         if self.queue is None:
             return
         for workflow in workflows:
-            self.queue.cancel_owner(workflow.id)
+            self.queue.cancel_owner(
+                workflow.id,
+                expected_attempt=workflow.attempt,
+                expected_terminal_handle=workflow.terminal_handle,
+            )
 
     @staticmethod
     def prepare_repository(repository: Path, runtime: WorkflowRuntime) -> None:
@@ -1166,15 +1170,29 @@ class WorkflowService:
         if close_external is None or not workflow.adapter_reference:
             return
         cleanup_errors: list[str] = []
-        observer_handles = set(self.store.owned_terminal_handles(workflow.id, kind="observer"))
-        coordinator_handles = set(
-            self.store.owned_terminal_handles(workflow.id, kind="coordinator")
+        if not workflow.terminal_handle:
+            return
+        scoped = {
+            "expected_attempt": workflow.attempt,
+            "expected_activation_handle": workflow.terminal_handle,
+        }
+        observer_handles = set(
+            self.store.owned_terminal_handles(workflow.id, kind="observer", **scoped)
         )
-        for handle in self.store.owned_terminal_handles(workflow.id):
+        coordinator_handles = set(
+            self.store.owned_terminal_handles(workflow.id, kind="coordinator", **scoped)
+        )
+        for handle in self.store.owned_terminal_handles(workflow.id, **scoped):
             if handle in coordinator_handles:
                 continue
             try:
                 close_external(workflow.adapter_reference, handle)
+                self.store.forget_owned_terminal(
+                    workflow.id,
+                    handle,
+                    expected_attempt=workflow.attempt,
+                    expected_activation_handle=workflow.terminal_handle,
+                )
                 if handle in observer_handles:
                     self.store.record_observer_termination(
                         workflow.id, handle, f"workflow_{workflow.status.value}"
@@ -1638,10 +1656,16 @@ class WorkflowService:
             for item in self.store.retained_worktrees(workflow.id)
         ):
             return ()
-        handles = set(self.store.owned_terminal_handles(workflow.id))
-        if workflow.terminal_handle:
-            handles.add(workflow.terminal_handle)
-        handles.update(handle for handle in extra_handles if handle)
+        if not workflow.terminal_handle:
+            return ()
+        handles = set(
+            self.store.owned_terminal_handles(
+                workflow.id,
+                expected_attempt=workflow.attempt,
+                expected_activation_handle=workflow.terminal_handle,
+            )
+        )
+        # Extra handles are hints only; the scoped ownership rows remain authoritative.
         closed: list[tuple[str, str]] = []
         for handle in sorted(handles):
             closed.append((workflow.adapter_reference, handle))
@@ -1652,6 +1676,12 @@ class WorkflowService:
             except (OSError, RuntimeError) as exc:
                 if not self._missing_selector(exc):
                     raise
+            self.store.forget_owned_terminal(
+                workflow.id,
+                handle,
+                expected_attempt=workflow.attempt,
+                expected_activation_handle=workflow.terminal_handle,
+            )
         if dry_run:
             return tuple(closed)
         # Reconciliation releases agent ownership, not the checkout or its Git metadata.

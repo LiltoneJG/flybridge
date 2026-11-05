@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -252,6 +252,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         handle TEXT NOT NULL,
         kind TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        attempt INTEGER,
+        activation_handle TEXT,
         PRIMARY KEY (workflow_id, handle)
     )
     """,
@@ -348,7 +350,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE queue_requests (
         id TEXT PRIMARY KEY, resource TEXT NOT NULL, owner TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('waiting','leased','released','cancelled'))
+        status TEXT NOT NULL CHECK(status IN ('waiting','leased','released','cancelled')),
+        owner_attempt INTEGER,
+        owner_terminal_handle TEXT
     )
     """,
     """
@@ -456,7 +460,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TRIGGER requests_insert INSTEAD OF INSERT ON requests
     BEGIN
-        INSERT INTO queue_requests VALUES (
+        INSERT INTO queue_requests(id, resource, owner, created_at, updated_at, status) VALUES (
             NEW.id, NEW.resource, NEW.owner, NEW.created_at, NEW.updated_at, NEW.status
         );
     END
@@ -769,7 +773,33 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 11")
-        return 11
+        version = 11
+    if version == 11:
+        terminal_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(owned_terminals)")
+        }
+        if "attempt" not in terminal_columns:
+            connection.execute("ALTER TABLE owned_terminals ADD COLUMN attempt INTEGER")
+        if "activation_handle" not in terminal_columns:
+            connection.execute("ALTER TABLE owned_terminals ADD COLUMN activation_handle TEXT")
+        request_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(queue_requests)")
+        }
+        if "owner_attempt" not in request_columns:
+            connection.execute("ALTER TABLE queue_requests ADD COLUMN owner_attempt INTEGER")
+        if "owner_terminal_handle" not in request_columns:
+            connection.execute("ALTER TABLE queue_requests ADD COLUMN owner_terminal_handle TEXT")
+        connection.execute(
+            "UPDATE owned_terminals SET attempt=(SELECT attempt FROM workflows WHERE id=workflow_id), "
+            "activation_handle=(SELECT terminal_handle FROM workflows WHERE id=workflow_id)"
+        )
+        connection.execute(
+            "UPDATE queue_requests SET owner_attempt=(SELECT attempt FROM workflows WHERE id=owner), "
+            "owner_terminal_handle=(SELECT terminal_handle FROM workflows WHERE id=owner) "
+            "WHERE EXISTS (SELECT 1 FROM workflows WHERE id=owner)"
+        )
+        connection.execute("PRAGMA user_version = 12")
+        return 12
     return version
 
 

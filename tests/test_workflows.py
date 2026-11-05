@@ -3141,8 +3141,10 @@ def test_starting_cancel_reads_ownership_committed_while_it_waits(
         ("current-owner", "/tmp/current", "agent", workflow.id),
     )
     locker.execute(
-        "INSERT INTO owned_terminals VALUES (?, ?, 'agent', ?)",
-        (workflow.id, "agent", "2026-01-01T00:00:00+00:00"),
+        "INSERT INTO owned_terminals("
+        "workflow_id, handle, kind, created_at, attempt, activation_handle"
+        ") VALUES (?, ?, 'agent', ?, 1, ?)",
+        (workflow.id, "agent", "2026-01-01T00:00:00+00:00", "agent"),
     )
 
     def cancel() -> None:
