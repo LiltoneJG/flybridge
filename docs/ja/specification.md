@@ -94,6 +94,10 @@ stateDiagram-v2
 - prompt が受け取るのはローカル文書の index であり、非公開 skill 文書の内容ではありません。agent には該当 path の文書を読み、ユーザーの指示なしに内容を repository へコピーしないよう指示します。
 - 選択された mode が必要とするすべての role に Orca agent を明示的に設定します。Flybridge が暗黙に agent を選ぶことはありません。
 
+## 信頼性試験
+
+監督・復旧の変更は[限定信頼性試験](reliability-trial.md)で評価します。生の運用記録と生成した集計はローカルに保持し、確認済みで機密性のない要約だけを追跡 issue に記録します。
+
 ## Resource queue の契約
 
 Flybridge は resource 名ごとに永続的な first-in, first-out queue を維持します。request は生成された request identifier と workflow owner ID で識別されます。
