@@ -193,6 +193,7 @@ def _workflow_list_item(workflow, *, owner_terminal_valid: bool) -> dict[str, ob
         "status": workflow.status,
         "role": workflow.role,
         "mode": workflow.mode,
+        "task_type": workflow.task_type,
         "repository": workflow.repository,
         "worktree_path": workflow.worktree_path,
         "adapter_reference": workflow.adapter_reference,
@@ -265,6 +266,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         config,
         repository=args.repository,
         mode=args.mode,
+        task_type=args.task_type,
         name=args.name,
         objective=objective,
         objective_source=objective_source,
@@ -345,6 +347,9 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
             mode = item.get("mode")
             if mode is not None and mode not in {"single", "orchestrated"}:
                 raise ValueError("batch item mode must be single or orchestrated")
+            task_type = item.get("task_type", args.task_type)
+            if task_type not in {"implementation", "continuation", "validation", "review"}:
+                raise ValueError("batch item task_type is invalid")
             if "objective_file" in item and "objective" in item:
                 raise ValueError("batch item cannot include both objective and objective_file")
             if "objective_file" in item:
@@ -370,6 +375,7 @@ def _cmd_start_batch(args: argparse.Namespace) -> int:
                 config,
                 repository=Path(path_value),
                 mode=mode,
+                task_type=task_type,
                 name=name,
                 objective=objective,
                 objective_source=objective_source,
@@ -442,6 +448,7 @@ def _start_one(
     *,
     repository: Path,
     mode: str | None,
+    task_type: str,
     name: str | None,
     objective: str,
     objective_source: Path | None = None,
@@ -539,6 +546,7 @@ def _start_one(
         resolved_mode,
         workflow_name,
         objective,
+        task_type=task_type,
         allow_duplicate=allow_duplicate,
         issue_url=issue_url,
         max_review_cycles=config.max_review_cycles,

@@ -46,6 +46,10 @@ def test_parser_keeps_canonical_top_level_commands() -> None:
     assert parser.parse_args(
         ["workflow", "start", ".", "--issue", "https://github.com/e/r/issues/1"]
     ).issue.endswith("/issues/1")
+    assert (
+        parser.parse_args(["workflow", "start", ".", "--task-type", "continuation"]).task_type
+        == "continuation"
+    )
     artifact = parser.parse_args(
         [
             "workflow",

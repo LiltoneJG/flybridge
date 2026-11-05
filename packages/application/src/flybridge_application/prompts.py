@@ -5,7 +5,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
-from flybridge_core import ConfigError, WorkflowMode, WorkflowRole
+from flybridge_core import ConfigError, TaskType, WorkflowMode, WorkflowRole
 
 ROLE_RESPONSIBILITIES = {
     WorkflowRole.MANAGER: (
@@ -372,6 +372,7 @@ def render_start_prompt(
     manager_plan: str | None = None,
     worker_verification: str | None = None,
     review_feedback: str | None = None,
+    task_type: TaskType = TaskType.IMPLEMENTATION,
 ) -> str:
     """Render the stable English prompt without copying private skill content."""
     if not objective.strip():
@@ -419,7 +420,10 @@ Resource coordination:
     link_guidance = f"\n{link_guidance}\n" if link_guidance else ""
     artifact_context = _artifact_context(manager_plan, worker_verification, review_feedback)
     artifact_context = f"\n{artifact_context}\n" if artifact_context else ""
+    task_guidance = _task_type_guidance(task_type)
     return f"""You are the {role} role in a {mode} Flybridge workflow.
+
+Task type: {task_type.value}. {task_guidance}
 
 Role responsibility: {ROLE_RESPONSIBILITIES[role]}
 Operator lifecycle: {_operator_lifecycle(role, workflow_id, config_path)}
@@ -462,6 +466,8 @@ def render_resume_prompt(
     manager_plan: str | None = None,
     worker_verification: str | None = None,
     review_feedback: str | None = None,
+    task_type: TaskType = TaskType.IMPLEMENTATION,
+    continuation_context: str | None = None,
 ) -> str:
     """Render concise restart context without embedding private skill content."""
     if not objective.strip():
@@ -506,8 +512,10 @@ def render_resume_prompt(
     link_guidance = _reference_link_guidance(role, workflow_id, config_path)
     link_guidance = f" {link_guidance}" if link_guidance else ""
     artifact_context = _artifact_context(manager_plan, worker_verification, review_feedback)
+    continuation = f" Continuation state: {continuation_context}" if continuation_context else ""
     return (
         f"Resume the persisted Flybridge workflow as the {role.value} role. "
+        f"Task type: {task_type.value}. {_task_type_guidance(task_type)}{continuation} "
         f"Continue this objective: {objective.strip()} "
         f"Role responsibility: {ROLE_RESPONSIBILITIES[role]} "
         f"Operator lifecycle: {_operator_lifecycle(role, workflow_id, config_path)}{branch_continuity} "
@@ -523,6 +531,19 @@ def render_resume_prompt(
         "messages when explaining them. Prefer established technical terms over literal "
         "translations that reduce clarity."
     )
+
+
+def _task_type_guidance(task_type: TaskType) -> str:
+    if task_type == TaskType.CONTINUATION:
+        return (
+            "Continue from the existing HEAD and working tree, preserve useful artifacts, and do not "
+            "reset to the workflow's original start SHA."
+        )
+    if task_type == TaskType.VALIDATION:
+        return "Validate the existing work; a new commit is not required for successful completion."
+    if task_type == TaskType.REVIEW:
+        return "Review only the recorded target SHA and do not modify the implementation."
+    return "Implement the requested change and commit verified code when this role owns implementation."
 
 
 def render_lease_grant_prompt(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from flybridge_core import ArgumentParser, WorkflowStatus
+from flybridge_core import ArgumentParser, TaskType, WorkflowStatus
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
     start = workflow_sub.add_parser("start", help="open a single or role-separated Orca workflow")
     start.add_argument("repository", type=Path, nargs="?", help="repository directory")
     start.add_argument("-m", "--mode", choices=["single", "orchestrated"], help="workflow mode")
+    start.add_argument(
+        "--task-type",
+        choices=[item.value for item in TaskType],
+        default=TaskType.IMPLEMENTATION.value,
+        help="completion and continuation contract; default: implementation",
+    )
     start.add_argument("-n", "--name", help="workflow name")
     start.add_argument("-o", "--objective", help="work objective, or @path to read a file")
     start.add_argument(
