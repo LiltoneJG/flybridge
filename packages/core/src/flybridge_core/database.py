@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -21,6 +21,22 @@ CREATE TABLE queue_dispatcher_control (
 """
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE workflow_execution_boundaries (
+        workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+        terminal_handle TEXT NOT NULL,
+        role TEXT NOT NULL,
+        skill_paths_json TEXT NOT NULL,
+        acceptance_evidence_json TEXT NOT NULL,
+        authority_json TEXT NOT NULL,
+        prohibitions_json TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        issue_url TEXT,
+        reviewed_sha TEXT,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        updated_at TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE workflow_continuations (
         workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
@@ -799,7 +815,15 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
             "WHERE EXISTS (SELECT 1 FROM workflows WHERE id=owner)"
         )
         connection.execute("PRAGMA user_version = 12")
-        return 12
+        version = 12
+    if version == 12:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE workflow_execution_boundaries" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 13")
+        return 13
     return version
 
 

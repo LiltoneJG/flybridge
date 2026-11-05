@@ -25,6 +25,11 @@ def test_prompt_is_english_and_indexes_paths_without_copying_skill_contents(tmp_
     )
 
     assert "You are the manager role" in prompt
+    assert "Execution boundary:" in prompt
+    assert "Applied role: manager" in prompt
+    assert "Applied skill index:" in prompt
+    assert "Authority:" in prompt
+    assert "Prohibitions:" in prompt
     assert "Do not implement the plan, create agents, delegate work" in prompt
     assert "Flybridge launches the worker" in prompt
     assert "remain parked in this terminal" in prompt

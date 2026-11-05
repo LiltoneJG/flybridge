@@ -261,6 +261,22 @@ class ExecutionResult:
     current: bool
 
 
+@dataclass(frozen=True)
+class ExecutionBoundary:
+    workflow_id: str
+    terminal_handle: str
+    role: str
+    skill_paths: tuple[str, ...]
+    acceptance_evidence: tuple[str, ...]
+    authority: tuple[str, ...]
+    prohibitions: tuple[str, ...]
+    repository: str
+    issue_url: str | None
+    reviewed_sha: str | None
+    generation: int
+    updated_at: str
+
+
 class AdapterReferenceConflict(ValueError):
     """An unreconciled workflow already owns an adapter reference."""
 
@@ -2131,6 +2147,77 @@ class WorkflowStore:
         values["dirty"] = bool(values["dirty"])
         values["artifacts"] = tuple(json.loads(values.pop("artifacts_json")))
         return ContinuationSnapshot(**values)
+
+    def record_execution_boundary(
+        self,
+        workflow_id: str,
+        *,
+        terminal_handle: str,
+        skill_paths: tuple[str, ...],
+        acceptance_evidence: tuple[str, ...],
+        authority: tuple[str, ...],
+        prohibitions: tuple[str, ...],
+    ) -> ExecutionBoundary:
+        """Persist the exact role contract applied to the current activation."""
+        workflow = self.get(workflow_id)
+        if workflow.status != WorkflowStatus.RUNNING:
+            raise ValueError("execution boundary requires a running workflow")
+        if workflow.terminal_handle != terminal_handle:
+            raise ValueError("execution boundary terminal is not the current activation")
+        if not authority or not prohibitions:
+            raise ValueError("execution boundary authority and prohibitions are required")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflow_execution_boundaries(
+                    workflow_id, terminal_handle, role, skill_paths_json,
+                    acceptance_evidence_json, authority_json, prohibitions_json,
+                    repository, issue_url, reviewed_sha, generation, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(workflow_id) DO UPDATE SET
+                    terminal_handle=excluded.terminal_handle,
+                    role=excluded.role,
+                    skill_paths_json=excluded.skill_paths_json,
+                    acceptance_evidence_json=excluded.acceptance_evidence_json,
+                    authority_json=excluded.authority_json,
+                    prohibitions_json=excluded.prohibitions_json,
+                    repository=excluded.repository,
+                    issue_url=excluded.issue_url,
+                    reviewed_sha=excluded.reviewed_sha,
+                    generation=workflow_execution_boundaries.generation + 1,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    workflow.id,
+                    terminal_handle,
+                    workflow.role.value,
+                    json.dumps(list(skill_paths)),
+                    json.dumps(list(acceptance_evidence)),
+                    json.dumps(list(authority)),
+                    json.dumps(list(prohibitions)),
+                    workflow.repository,
+                    workflow.issue_url,
+                    workflow.start_sha if workflow.role == WorkflowRole.REVIEWER else None,
+                    now,
+                ),
+            )
+        boundary = self.execution_boundary(workflow.id)
+        assert boundary is not None
+        return boundary
+
+    def execution_boundary(self, workflow_id: str) -> ExecutionBoundary | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_execution_boundaries WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        for field in ("skill_paths", "acceptance_evidence", "authority", "prohibitions"):
+            values[field] = tuple(json.loads(values.pop(f"{field}_json")))
+        return ExecutionBoundary(**values)
 
     def record_execution_result(
         self,
