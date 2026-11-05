@@ -422,6 +422,9 @@ def test_cli_checkpoint_and_final_report_use_distinct_contracts(
     assert main(arguments) == 0
     assert batches.single_report(single_id)["final"] is True
     assert batches.single_report(single_id)["current"] is True
+    structured = store.execution_result(single_id)
+    assert structured.outcome == "blocked"
+    assert structured.unresolved == ("Parked.",)
 
 
 @pytest.mark.parametrize("resource_work", ["manual", "cancelled-wait", "job", "promoted-job"])

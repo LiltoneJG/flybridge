@@ -30,6 +30,7 @@ from .types import (
 )
 from .workflows import (
     AdapterReferenceConflict,
+    ExecutionResult,
     LifecycleOperationConflict,
     OrchestrationRun,
     RoleReadiness,
@@ -50,6 +51,7 @@ __all__ = [
     "ArgumentParser",
     "BatchStore",
     "ConfigError",
+    "ExecutionResult",
     "GitHubIssueRef",
     "LifecycleOperationConflict",
     "OrchestrationRun",

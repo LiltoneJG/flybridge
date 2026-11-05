@@ -9,6 +9,7 @@ from uuid import UUID
 
 from flybridge_core import (
     AdapterReferenceConflict,
+    ExecutionResult,
     LifecycleOperationConflict,
     OrchestrationRun,
     ResourceQueue,
@@ -420,13 +421,18 @@ class WorkflowService:
             WorkflowRole.REVIEWER: "review",
         }[workflow.role]
         artifact, artifact_content = self.artifacts.read(workflow.id, kind)
-        if workflow.role == WorkflowRole.WORKER:
-            runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
-        else:
-            runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
         blocked_reason = summary if outcome == "blocked" else None
         reviewer_outcome = None if outcome == "blocked" else outcome
-        return self.store.record_role_readiness(
+        # A declared blocker is evidence that the role cannot satisfy its success
+        # gate.  Keep ownership, persisted-identity, artifact, attempt and queue
+        # validation, but do not make a clean/committed success state a
+        # prerequisite for recording why work stopped.
+        if blocked_reason is None:
+            if workflow.role == WorkflowRole.WORKER:
+                runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
+            else:
+                runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
+        readiness = self.store.record_role_readiness(
             workflow.id,
             summary=summary,
             outcome=reviewer_outcome,
@@ -434,6 +440,55 @@ class WorkflowService:
             artifact_kind=kind,
             artifact_sha256=artifact.sha256,
             artifact_content=artifact_content,
+        )
+        if workflow.terminal_handle:
+            self.record_execution_result(
+                workflow.id,
+                expected_terminal_handle=workflow.terminal_handle,
+                outcome="blocked" if blocked_reason is not None else "done",
+                source="agent",
+                summary=summary,
+                validation=() if blocked_reason is not None else (f"{kind} artifact verified",),
+                unresolved=() if blocked_reason is None else (blocked_reason,),
+            )
+        return readiness
+
+    def record_execution_result(
+        self,
+        workflow_id: str,
+        *,
+        expected_terminal_handle: str,
+        outcome: str,
+        source: str,
+        summary: str,
+        validation: tuple[str, ...] = (),
+        unresolved: tuple[str, ...] = (),
+    ) -> ExecutionResult:
+        workflow = self.store.get(workflow_id)
+        repository = workflow.implementation_repository or workflow.repository
+        sha = workflow.start_sha
+        if workflow.worktree_path:
+            try:
+                state = GitWorktreeProbe().inspect(workflow.worktree_path)
+                repository = state.github_repository or repository
+                sha = state.commit_sha or sha
+            except (GitProbeError, OSError, RuntimeError, ValueError):
+                pass
+        artifacts = tuple(
+            f"{item.kind}:{item.sha256}" for item in self.artifacts.list_for_workflow(workflow.id)
+        )
+        return self.store.record_execution_result(
+            workflow.id,
+            expected_terminal_handle=expected_terminal_handle,
+            outcome=outcome,
+            source=source,
+            summary=summary,
+            repository=repository,
+            sha=sha,
+            artifacts=artifacts,
+            validation=validation,
+            unresolved=unresolved,
+            final=outcome != "question-waiting",
         )
 
     def artifact_metadata(self, workflow_id: str) -> list[WorkflowArtifact]:

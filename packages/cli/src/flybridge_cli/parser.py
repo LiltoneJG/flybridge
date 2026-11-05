@@ -290,6 +290,25 @@ def build_parser() -> argparse.ArgumentParser:
     single_report.add_argument(
         "--checkpoint", action="store_true", help="record progress, not a final result"
     )
+    result_report = workflow_sub.add_parser(
+        "result-report", help="record an activation-bound structured execution result"
+    )
+    result_report.add_argument("workflow_id")
+    result_report.add_argument("--terminal-handle", required=True)
+    result_report.add_argument(
+        "--outcome",
+        required=True,
+        choices=[
+            "done",
+            "blocked",
+            "failed",
+            "question-waiting",
+            "runtime-error",
+        ],
+    )
+    result_report.add_argument("--summary", required=True)
+    result_report.add_argument("--validation", action="append", default=[])
+    result_report.add_argument("--unresolved", action="append", default=[])
     batch = workflow_sub.add_parser("batch", help="inspect or watch a parent batch")
     batch_sub = batch.add_subparsers(dest="batch_command", required=True)
     batch_status = batch_sub.add_parser("status")

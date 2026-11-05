@@ -75,7 +75,7 @@ stateDiagram-v2
     reviewers_running --> worker_running: cycle 上限未満の changes-requested
 ```
 
-manager、worker、reviewer は別々の永続 record です。親 role の選択、handoff、role 順序、review-cycle limit、readiness consumption は application policy であり、prompt の解釈ではありません。1つの coordinator terminal が restart-safe supervisor loop を実行します。role が role-owned artifact を保存して `role-ready` を記録すると、supervisor は artifact digest、repository identity、Git state を検証してから role を完了し child を起動します。successor の running を確認した後に readiness を consume するため、transition は replay-safe です。
+manager、worker、reviewer は別々の永続 record です。親 role の選択、handoff、role 順序、review-cycle limit、readiness consumption は application policy であり、prompt の解釈ではありません。1つの coordinator terminal が restart-safe supervisor loop を実行します。role が role-owned artifact を保存して `role-ready` を記録すると、success readiness では artifact digest、repository identity、role 固有の Git success state を検証してから supervisor が role を完了し child を起動します。blocked readiness は identity、artifact、attempt、queue ownership の検証を維持しますが、停止理由を永続化できるよう success 専用の clean/commit gate を意図的に省きます。successor の running を確認した後に readiness を consume するため、transition は replay-safe です。
 
 artifact は `state_dir/artifacts/workflows/<manager-id>/` 配下の private かつ size-bounded な UTF-8 file です。file 名には content の SHA-256 を含み、SQLite v4 は digest、size、owner、relative path を保持します。manager は `start_sha` のままとし、reviewer worktree に渡るのは worker の実装 commit だけです。changes-requested review は既存 worker に注入され、review 済み SHA より新しい commit を要求します。
 

@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 from flybridge_application import WorkflowService
-from flybridge_core import ReconcileStore, ResourceQueue, WorkflowArtifactStore, WorkflowStore
+from flybridge_core import (
+    ReconcileStore,
+    ResourceQueue,
+    WorkflowArtifactStore,
+    WorkflowRole,
+    WorkflowStore,
+)
 from flybridge_core.workflows import SCHEMA_VERSION
 from flybridge_orca.client import OrcaStartError, OrcaTimeoutError
 
@@ -231,6 +237,147 @@ def test_role_ready_requires_worker_commit_and_reviewer_outcome(tmp_path: Path) 
         service.role_ready(worker.id, Runtime(), summary="Ready for review.")
     with pytest.raises(ValueError, match="requires approved or changes-requested"):
         service.role_ready(reviewer.id, Runtime(), summary="Reviewed.")
+
+
+@pytest.mark.parametrize("role", [WorkflowRole.MANAGER, WorkflowRole.WORKER, WorkflowRole.REVIEWER])
+def test_blocked_role_ready_skips_success_git_gate_but_keeps_identity_and_artifact_validation(
+    tmp_path: Path, role: WorkflowRole
+) -> None:
+    store = WorkflowStore(tmp_path)
+    service = WorkflowService(store)
+    manager, worker, reviewer = store.create_orchestrated_plan(
+        tmp_path, "blocked-dirty", "Implement."
+    )
+    workflow = {
+        WorkflowRole.MANAGER: manager,
+        WorkflowRole.WORKER: worker,
+        WorkflowRole.REVIEWER: reviewer,
+    }[role]
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference=f"repo::{role.value}",
+        worktree_path=f"/tmp/{role.value}",
+        terminal_handle=f"{role.value}-terminal",
+        implementation_repository="example/repo",
+        runtime_repository_id="repo",
+        start_sha="start",
+    )
+    store.transition(workflow.id, "running")
+    artifact_kind = {
+        WorkflowRole.MANAGER: "plan",
+        WorkflowRole.WORKER: "verification",
+        WorkflowRole.REVIEWER: "review",
+    }[role]
+    service.put_artifact(workflow.id, artifact_kind, "Verified scope and unresolved blocker.")
+    calls: list[str] = []
+
+    class Runtime:
+        def verify_implementation_identity(self, *_args) -> None:
+            calls.append("identity")
+
+        def verify_worker_ready(self, *_args) -> None:
+            raise AssertionError("blocked readiness must not require a worker success gate")
+
+        def verify_pristine_start(self, *_args) -> None:
+            raise AssertionError("blocked readiness must not require a pristine success gate")
+
+    readiness = service.role_ready(
+        workflow.id,
+        Runtime(),
+        summary="Required environment is unavailable.",
+        outcome="blocked",
+    )
+
+    assert calls == ["identity"]
+    assert readiness.blocked_reason == "Required environment is unavailable."
+    assert readiness.outcome is None
+
+
+def test_execution_result_is_structured_idempotent_and_activation_bound(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    workflow = store.create(tmp_path, "single", "structured-result", "Implement.")
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference="repo::result",
+        worktree_path=str(tmp_path),
+        terminal_handle="agent-1",
+        implementation_repository="example/repo",
+        runtime_repository_id="repo",
+        start_sha="abc123",
+    )
+    store.transition(workflow.id, "running")
+
+    kwargs = {
+        "expected_terminal_handle": "agent-1",
+        "outcome": "done",
+        "source": "agent",
+        "summary": "Implementation and validation completed.",
+        "repository": "example/repo",
+        "sha": "def456",
+        "artifacts": ("verification:abc",),
+        "validation": ("unit tests passed",),
+        "unresolved": (),
+    }
+    result = store.record_execution_result(workflow.id, **kwargs)
+    repeated = store.record_execution_result(workflow.id, **kwargs)
+
+    assert repeated == result
+    assert result.run_id == workflow.run_id
+    assert result.role == "single"
+    assert result.attempt == 1
+    assert result.current is True
+    assert result.artifacts == ("verification:abc",)
+    assert result.validation == ("unit tests passed",)
+    with pytest.raises(ValueError, match="final execution result"):
+        store.record_execution_result(
+            workflow.id,
+            **{**kwargs, "outcome": "failed", "summary": "Late conflicting failure."},
+        )
+    with pytest.raises(ValueError, match="superseded activation"):
+        store.record_execution_result(
+            workflow.id,
+            **{**kwargs, "expected_terminal_handle": "agent-old"},
+        )
+
+
+def test_question_waiting_can_be_replaced_once_by_a_final_result(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    workflow = store.create(tmp_path, "single", "question", "Investigate.")
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference="repo::question",
+        worktree_path=str(tmp_path),
+        terminal_handle="agent-question",
+    )
+    store.transition(workflow.id, "running")
+    waiting = store.record_execution_result(
+        workflow.id,
+        expected_terminal_handle="agent-question",
+        outcome="question-waiting",
+        source="agent",
+        summary="Which compatibility target should be used?",
+        repository=str(tmp_path),
+        sha=None,
+        unresolved=("Compatibility target requires operator input.",),
+        final=False,
+    )
+    done = store.record_execution_result(
+        workflow.id,
+        expected_terminal_handle="agent-question",
+        outcome="done",
+        source="agent",
+        summary="Operator answer applied and validation completed.",
+        repository=str(tmp_path),
+        sha="abc123",
+        validation=("focused test passed",),
+    )
+
+    assert waiting.final is False
+    assert done.final is True
+    assert store.execution_result(workflow.id) == done
 
 
 def test_role_ready_rejects_single_workflows_before_runtime_verification(tmp_path: Path) -> None:

@@ -111,3 +111,122 @@ def test_single_transient_failure_retries_without_orchestration_state(tmp_path, 
     )
     assert len(calls) == 2
     assert closed == ["supervisor"]
+
+
+def test_watchdog_records_result_missing_when_owner_process_exits(tmp_path, monkeypatch):
+    service, owner, config, closed = _setup(tmp_path, monkeypatch)
+    service = WorkflowService(WorkflowStore(tmp_path), ResourceQueue(tmp_path))
+    lifecycle = []
+    runtime = SimpleNamespace(
+        agent_owner_state=lambda *_args: "invalid",
+        set_lifecycle=lambda *_args: lifecycle.append(_args),
+        close_terminals=lambda _ref, handle: closed.append(handle),
+    )
+    monkeypatch.setattr(
+        service,
+        "salvage_progress",
+        lambda *_args: {
+            "workflow_id": owner,
+            "sha": None,
+            "pushed": False,
+            "skip_reason": "no_commits",
+            "error": None,
+            "created_at": "now",
+            "push": None,
+        },
+    )
+
+    result = command._apply_watchdog(service, config, runtime, owner)
+
+    assert result["action"] == "blocked"
+    assert result["reason"] == "result-missing"
+    assert result["result"]["outcome"] == "result-missing"
+    assert result["result"]["source"] == "monitor"
+    assert service.store.get(owner).status == "cancelled"
+    recorded = service.store.execution_result(owner)
+    assert recorded.outcome == "result-missing"
+    assert recorded.current is False
+    assert lifecycle
+
+
+def test_watchdog_replays_persisted_result_missing_after_interrupted_finalization(
+    tmp_path, monkeypatch
+):
+    service, owner, config, closed = _setup(tmp_path, monkeypatch)
+    workflow = service.store.get(owner)
+    persisted = service.record_execution_result(
+        owner,
+        expected_terminal_handle=workflow.terminal_handle,
+        outcome="result-missing",
+        source="monitor",
+        summary="Owner process exited without a final result.",
+        unresolved=("No final execution result was received.",),
+    )
+    service = WorkflowService(WorkflowStore(tmp_path), ResourceQueue(tmp_path))
+    runtime = SimpleNamespace(
+        agent_owner_state=lambda *_args: "invalid",
+        set_lifecycle=lambda *_args: None,
+        close_terminals=lambda _ref, handle: closed.append(handle),
+    )
+    monkeypatch.setattr(
+        service,
+        "salvage_progress",
+        lambda *_args: {
+            "workflow_id": owner,
+            "sha": None,
+            "pushed": False,
+            "skip_reason": "no_commits",
+            "error": None,
+            "created_at": "now",
+            "push": None,
+        },
+    )
+
+    replayed = command._apply_watchdog(service, config, runtime, owner)
+
+    assert replayed["action"] == "blocked"
+    assert replayed["result"]["updated_at"] == persisted.updated_at
+    assert service.store.get(owner).status == "cancelled"
+
+
+def test_watchdog_surfaces_question_waiting_without_timing_out(tmp_path, monkeypatch):
+    service, owner, config, closed = _setup(tmp_path, monkeypatch)
+    workflow = service.store.get(owner)
+    waiting = service.record_execution_result(
+        owner,
+        expected_terminal_handle=workflow.terminal_handle,
+        outcome="question-waiting",
+        source="agent",
+        summary="Which target should be used?",
+        unresolved=("Target selection requires operator input.",),
+    )
+    service = WorkflowService(WorkflowStore(tmp_path), ResourceQueue(tmp_path))
+    runtime = SimpleNamespace(agent_owner_state=lambda *_args: "invalid")
+
+    result = command._apply_watchdog(service, config, runtime, owner)
+
+    assert result["action"] == "question-waiting"
+    assert result["result"]["updated_at"] == waiting.updated_at
+    assert service.store.get(owner).status == "running"
+    assert closed == []
+
+
+def test_watchdog_surfaces_explicit_runtime_error_after_restart(tmp_path, monkeypatch):
+    service, owner, config, _closed = _setup(tmp_path, monkeypatch)
+    workflow = service.store.get(owner)
+    service.record_execution_result(
+        owner,
+        expected_terminal_handle=workflow.terminal_handle,
+        outcome="runtime-error",
+        source="agent",
+        summary="Tool transport failed.",
+        unresolved=("Retry requires operator approval.",),
+    )
+    service = WorkflowService(WorkflowStore(tmp_path), ResourceQueue(tmp_path))
+    runtime = SimpleNamespace(agent_owner_state=lambda *_args: "valid")
+
+    result = command._apply_watchdog(service, config, runtime, owner)
+
+    assert result["action"] == "result-received"
+    assert result["outcome"] == "runtime-error"
+    assert result["result"]["source"] == "agent"
