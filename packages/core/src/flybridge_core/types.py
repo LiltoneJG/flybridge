@@ -22,6 +22,13 @@ class WorkflowRole(StrEnum):
     REVIEWER = "reviewer"
 
 
+class TaskType(StrEnum):
+    IMPLEMENTATION = "implementation"
+    CONTINUATION = "continuation"
+    VALIDATION = "validation"
+    REVIEW = "review"
+
+
 class QueueRequestStatus(StrEnum):
     WAITING = "waiting"
     LEASED = "leased"

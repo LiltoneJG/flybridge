@@ -8,6 +8,7 @@ from flybridge_application import WorkflowService
 from flybridge_core import (
     ReconcileStore,
     ResourceQueue,
+    TaskType,
     WorkflowArtifactStore,
     WorkflowRole,
     WorkflowStore,
@@ -237,6 +238,81 @@ def test_role_ready_requires_worker_commit_and_reviewer_outcome(tmp_path: Path) 
         service.role_ready(worker.id, Runtime(), summary="Ready for review.")
     with pytest.raises(ValueError, match="requires approved or changes-requested"):
         service.role_ready(reviewer.id, Runtime(), summary="Reviewed.")
+    approved = service.role_ready(
+        reviewer.id, Runtime(), summary="Reviewed target SHA.", outcome="approved"
+    )
+    assert approved.reviewed_sha == "start"
+
+
+def test_validation_worker_can_complete_readiness_without_a_new_commit(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    service = WorkflowService(store)
+    _manager, worker, _reviewer = store.create_orchestrated_plan(
+        tmp_path, "validate", "Validate.", task_type=TaskType.VALIDATION
+    )
+    store.begin_start(worker.id)
+    store.attach_external(
+        worker.id,
+        adapter_reference="repo::worker",
+        worktree_path="/tmp/worker",
+        terminal_handle="worker-terminal",
+        implementation_repository="example/repo",
+        runtime_repository_id="repo",
+        start_sha="unchanged",
+    )
+    store.transition(worker.id, "running")
+    service.put_artifact(worker.id, "verification", "Existing work passes validation.")
+    calls: list[str] = []
+
+    class Runtime:
+        def verify_implementation_identity(self, *_args) -> None:
+            pass
+
+        def verify_pristine_start(self, _path: str, sha: str) -> None:
+            calls.append(sha)
+
+        def verify_worker_ready(self, *_args) -> None:
+            raise AssertionError("validation-only work must not require a new commit")
+
+    readiness = service.role_ready(worker.id, Runtime(), summary="Validation passed.")
+
+    assert readiness.role == "worker"
+    assert calls == ["unchanged"]
+
+
+def test_continuation_snapshot_preserves_existing_state_and_next_action(tmp_path: Path) -> None:
+    store = WorkflowStore(tmp_path)
+    workflow = store.create(
+        tmp_path,
+        "single",
+        "continue",
+        "Repair existing work.",
+        task_type=TaskType.CONTINUATION,
+    )
+    store.begin_start(workflow.id)
+    store.attach_external(
+        workflow.id,
+        adapter_reference="repo::existing",
+        worktree_path="/tmp/existing",
+        terminal_handle="agent-old",
+        start_sha="original-sha",
+    )
+    store.transition(workflow.id, "running")
+
+    snapshot = store.record_continuation(
+        workflow.id,
+        expected_terminal_handle="agent-old",
+        existing_sha="descendant-sha",
+        dirty=True,
+        artifacts=("verification:abc123",),
+        next_action="Finish the remaining repair.",
+    )
+
+    assert store.get(workflow.id).task_type == TaskType.CONTINUATION
+    assert snapshot.existing_sha == "descendant-sha"
+    assert snapshot.dirty is True
+    assert snapshot.artifacts == ("verification:abc123",)
+    assert snapshot.next_action == "Finish the remaining repair."
 
 
 @pytest.mark.parametrize("role", [WorkflowRole.MANAGER, WorkflowRole.WORKER, WorkflowRole.REVIEWER])

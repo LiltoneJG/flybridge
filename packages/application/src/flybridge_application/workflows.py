@@ -14,6 +14,7 @@ from flybridge_core import (
     OrchestrationRun,
     ResourceQueue,
     RoleReadiness,
+    TaskType,
     WorkflowArtifact,
     WorkflowArtifactStore,
     WorkflowMode,
@@ -429,7 +430,10 @@ class WorkflowService:
         # prerequisite for recording why work stopped.
         if blocked_reason is None:
             if workflow.role == WorkflowRole.WORKER:
-                runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
+                if workflow.task_type == TaskType.VALIDATION:
+                    runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
+                else:
+                    runtime.verify_worker_ready(workflow.worktree_path, workflow.start_sha)
             else:
                 runtime.verify_pristine_start(workflow.worktree_path, workflow.start_sha)
         readiness = self.store.record_role_readiness(
@@ -498,13 +502,16 @@ class WorkflowService:
         """Read-only run progress for `workflow status`, without artifact bodies."""
         workflow = self.store.get(workflow_id)
         if workflow.mode != WorkflowMode.ORCHESTRATED:
-            return {
+            result: dict[str, object] = {
                 "stage": workflow.status.value,
                 "current_review_cycle": None,
                 "max_review_cycles": None,
                 "roles": [_progress_role(workflow)],
                 "readiness": [],
             }
+            if workflow.task_type == TaskType.CONTINUATION:
+                result["continuation"] = self._continuation_view(workflow)
+            return result
         root_id = workflow.id if workflow.parent_id is None else workflow.parent_id
         if root_id is None:
             raise ValueError("orchestrated role has no root manager")
@@ -519,7 +526,7 @@ class WorkflowService:
             record.status == WorkflowStatus.RUNNING and record.id in waiting_owners
             for record in (manager, *children)
         )
-        return {
+        result = {
             "stage": progress_stage(
                 manager=manager,
                 children=children,
@@ -531,6 +538,32 @@ class WorkflowService:
             "roles": [_progress_role(manager), *(_progress_role(child) for child in children)],
             "readiness": [asdict(item) for item in self.store.role_readiness_history(root_id)],
         }
+        if workflow.task_type == TaskType.CONTINUATION:
+            result["continuation"] = self._continuation_view(workflow)
+        return result
+
+    def _continuation_view(self, workflow: WorkflowRecord) -> dict[str, object] | None:
+        snapshot = self.store.continuation_snapshot(workflow.id)
+        return None if snapshot is None else asdict(snapshot)
+
+    def _record_continuation_state(self, workflow: WorkflowRecord, next_action: str) -> None:
+        if workflow.task_type != TaskType.CONTINUATION:
+            return
+        if not workflow.terminal_handle or not workflow.worktree_path:
+            raise ValueError("continuation requires a current terminal and worktree")
+        state = GitWorktreeProbe().inspect(workflow.worktree_path)
+        artifacts = tuple(
+            f"{artifact.kind}:{artifact.sha256}"
+            for artifact in self.artifacts.list_for_workflow(workflow.id)
+        )
+        self.store.record_continuation(
+            workflow.id,
+            expected_terminal_handle=workflow.terminal_handle,
+            existing_sha=state.commit_sha,
+            dirty=state.dirty,
+            artifacts=artifacts,
+            next_action=next_action,
+        )
 
     def _artifact_prompt_context(
         self, workflow: WorkflowRecord
@@ -630,6 +663,7 @@ class WorkflowService:
             manager_plan=manager_plan,
             worker_verification=worker_verification,
             review_feedback=review_feedback,
+            task_type=workflow.task_type,
         )
 
         def create_external():
@@ -748,9 +782,20 @@ class WorkflowService:
             manager_plan=manager_plan,
             worker_verification=worker_verification,
             review_feedback=review_feedback,
+            task_type=workflow.task_type,
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        continuation_action = followup or workflow.objective
+        self._record_continuation_state(workflow, continuation_action)
+        snapshot = self.store.continuation_snapshot(workflow.id)
+        if snapshot is not None:
+            prompt += (
+                " Continuation snapshot: existing SHA "
+                f"{snapshot.existing_sha}; dirty={str(snapshot.dirty).lower()}; "
+                f"preserved artifacts={', '.join(snapshot.artifacts) or 'none'}; "
+                f"next action={snapshot.next_action}."
+            )
         if codex_session_id is not None:
             preflight = getattr(runtime, "validate_codex_resume", None)
             if callable(preflight):
@@ -870,9 +915,11 @@ class WorkflowService:
             manager_plan=manager_plan,
             worker_verification=worker_verification,
             review_feedback=review_feedback,
+            task_type=workflow.task_type,
         )
         runtime.verify_worktree(workflow.adapter_reference, workflow.worktree_path)
         self._verify_persisted_identity(workflow, runtime)
+        self._record_continuation_state(workflow, workflow.objective)
         if workflow.mode == WorkflowMode.SINGLE:
             self.store.mark_resumed(workflow.id)
         replacement = runtime.create_new_agent_terminal(

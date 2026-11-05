@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -21,6 +21,17 @@ CREATE TABLE queue_dispatcher_control (
 """
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE workflow_continuations (
+        workflow_id TEXT PRIMARY KEY REFERENCES workflows(id),
+        terminal_handle TEXT NOT NULL,
+        existing_sha TEXT NOT NULL,
+        dirty INTEGER NOT NULL CHECK(dirty IN (0, 1)),
+        artifacts_json TEXT NOT NULL,
+        next_action TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE workflow_execution_results (
         workflow_id TEXT NOT NULL REFERENCES workflows(id),
@@ -89,6 +100,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         mode TEXT NOT NULL CHECK(mode IN ('single', 'orchestrated')),
         name TEXT NOT NULL,
         objective TEXT NOT NULL,
+        task_type TEXT NOT NULL DEFAULT 'implementation' CHECK(task_type IN (
+            'implementation', 'continuation', 'validation', 'review'
+        )),
         role TEXT NOT NULL,
         slot INTEGER NOT NULL DEFAULT 0 CHECK(slot >= 0),
         attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),
@@ -307,6 +321,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         summary TEXT NOT NULL,
         outcome TEXT CHECK(outcome IN ('approved', 'changes-requested')),
         blocked_reason TEXT,
+        reviewed_sha TEXT,
         artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('plan', 'verification', 'review')),
         artifact_sha256 TEXT NOT NULL,
         artifact_content TEXT NOT NULL,
@@ -731,7 +746,30 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
                     statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                 )
         connection.execute("PRAGMA user_version = 10")
-        return 10
+        version = 10
+    if version == 10:
+        workflow_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(workflows)").fetchall()
+        }
+        if "task_type" not in workflow_columns:
+            connection.execute(
+                "ALTER TABLE workflows ADD COLUMN task_type TEXT NOT NULL "
+                "DEFAULT 'implementation' CHECK(task_type IN "
+                "('implementation','continuation','validation','review'))"
+            )
+        readiness_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(workflow_role_readiness)").fetchall()
+        }
+        if "reviewed_sha" not in readiness_columns:
+            connection.execute("ALTER TABLE workflow_role_readiness ADD COLUMN reviewed_sha TEXT")
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE workflow_continuations" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 11")
+        return 11
     return version
 
 

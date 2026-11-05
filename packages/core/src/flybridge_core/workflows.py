@@ -11,7 +11,7 @@ from pathlib import Path
 from .batches import single_report_current
 from .database import SCHEMA_VERSION as DATABASE_SCHEMA_VERSION
 from .database import connect_database, prepare_database
-from .types import WorkflowMode, WorkflowRole, WorkflowStatus
+from .types import TaskType, WorkflowMode, WorkflowRole, WorkflowStatus
 
 TRANSITIONS = {
     WorkflowStatus.REQUESTED: {WorkflowStatus.STARTING, WorkflowStatus.CANCELLED},
@@ -30,7 +30,7 @@ TRANSITIONS = {
     WorkflowStatus.CANCELLED: set(),
 }
 _WORKFLOW_COLUMNS = (
-    "id, run_id, repository, mode, name, objective, role, slot, attempt, parent_id, status, adapter_reference, "
+    "id, run_id, repository, mode, name, objective, task_type, role, slot, attempt, parent_id, status, adapter_reference, "
     "worktree_path, terminal_handle, error, cleanup_error, external_reconciled_at, "
     "created_at, updated_at, queue_observer_enabled, observer_last_handle, "
     "observer_stopped_at, observer_stop_reason, issue_url, implementation_repository, start_sha, "
@@ -39,6 +39,7 @@ _WORKFLOW_COLUMNS = (
 _WORKFLOW_SELECT = (
     "workflows.id AS id, workflows.run_id AS run_id, workflows.repository AS repository, workflows.mode AS mode, "
     "workflows.name AS name, workflows.objective AS objective, workflows.role AS role, "
+    "workflows.task_type AS task_type, "
     "workflows.slot AS slot, workflows.attempt AS attempt, "
     "workflows.parent_id AS parent_id, workflows.status AS status, "
     "workflows.adapter_reference AS adapter_reference, workflows.worktree_path AS worktree_path, "
@@ -124,6 +125,7 @@ class WorkflowRecord:
     mode: WorkflowMode
     name: str
     objective: str
+    task_type: TaskType
     role: WorkflowRole
     slot: int
     attempt: int
@@ -158,6 +160,17 @@ class WorkflowHandoff:
 
 
 @dataclass(frozen=True)
+class ContinuationSnapshot:
+    workflow_id: str
+    terminal_handle: str
+    existing_sha: str
+    dirty: bool
+    artifacts: tuple[str, ...]
+    next_action: str
+    recorded_at: str
+
+
+@dataclass(frozen=True)
 class OrchestrationRun:
     root_manager_id: str
     status: str
@@ -184,6 +197,7 @@ class RoleReadiness:
     summary: str
     outcome: str | None
     blocked_reason: str | None
+    reviewed_sha: str | None
     artifact_kind: str
     artifact_sha256: str
     artifact_content: str
@@ -193,7 +207,7 @@ class RoleReadiness:
 
 _ROLE_READINESS_VIEW_COLUMNS = (
     "id, root_manager_id, workflow_id, role, attempt, summary, outcome, blocked_reason, "
-    "artifact_kind, artifact_sha256, created_at, consumed_at"
+    "reviewed_sha, artifact_kind, artifact_sha256, created_at, consumed_at"
 )
 
 
@@ -209,6 +223,7 @@ class RoleReadinessView:
     summary: str
     outcome: str | None
     blocked_reason: str | None
+    reviewed_sha: str | None
     artifact_kind: str
     artifact_sha256: str
     created_at: str
@@ -301,6 +316,7 @@ class WorkflowStore:
     def _record(row: sqlite3.Row) -> WorkflowRecord:
         values = dict(row)
         values["mode"] = WorkflowMode(values["mode"])
+        values["task_type"] = TaskType(values["task_type"])
         values["role"] = WorkflowRole(values["role"])
         values["status"] = WorkflowStatus(values["status"])
         values["owns_worktree"] = bool(values["owns_worktree"])
@@ -315,14 +331,16 @@ class WorkflowStore:
         objective: str,
         *,
         role: str | WorkflowRole = WorkflowRole.SINGLE,
+        task_type: str | TaskType = TaskType.IMPLEMENTATION,
         parent_id: str | None = None,
         issue_url: str | None = None,
     ) -> WorkflowRecord:
         try:
             mode = WorkflowMode(mode)
             role = WorkflowRole(role)
+            task_type = TaskType(task_type)
         except ValueError as exc:
-            raise ValueError("workflow mode or role is invalid") from exc
+            raise ValueError("workflow mode, role, or task type is invalid") from exc
         if mode not in WorkflowMode:
             raise ValueError("workflow mode must be 'single' or 'orchestrated'")
         if not name.strip() or not objective.strip():
@@ -353,6 +371,9 @@ class WorkflowStore:
                         raise ValueError(
                             "only an orchestrated manager can own worker or reviewer roles"
                         )
+                    task_type = (
+                        TaskType.REVIEW if role == WorkflowRole.REVIEWER else parent.task_type
+                    )
                     duplicate_role = connection.execute(
                         "SELECT 1 FROM workflows WHERE parent_id = ? AND role = ?",
                         (parent_id, role.value),
@@ -362,10 +383,10 @@ class WorkflowStore:
                 connection.execute(
                     """
                     INSERT INTO workflows(
-                        id, repository, mode, name, objective, role, parent_id, status,
+                        id, repository, mode, name, objective, task_type, role, parent_id, status,
                         adapter_reference, worktree_path, terminal_handle, error, queue_observer_enabled,
                         issue_url, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', NULL, NULL, NULL, NULL, 0, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'requested', NULL, NULL, NULL, NULL, 0, ?, ?, ?)
                     """,
                     (
                         workflow_id,
@@ -373,6 +394,7 @@ class WorkflowStore:
                         mode.value,
                         name,
                         objective,
+                        task_type.value,
                         role.value,
                         parent_id,
                         issue_url,
@@ -398,6 +420,7 @@ class WorkflowStore:
         name: str,
         objective: str,
         *,
+        task_type: str | TaskType = TaskType.IMPLEMENTATION,
         issue_url: str | None = None,
         max_review_cycles: int = 3,
         reviewer_count: int = 1,
@@ -409,6 +432,7 @@ class WorkflowStore:
             raise ValueError("max_review_cycles must be a positive integer")
         if type(reviewer_count) is not int or reviewer_count < 1:
             raise ValueError("reviewer_count must be a positive integer")
+        task_type = TaskType(task_type)
         objective = objective.strip()
         now = _now()
         manager_id, worker_id = str(uuid.uuid4()), str(uuid.uuid4())
@@ -439,16 +463,17 @@ class WorkflowStore:
                 for workflow_id, workflow_name, role, parent_id, slot in rows:
                     connection.execute(
                         """
-                        INSERT INTO workflows(id, repository, mode, name, objective, role, slot, parent_id,
+                        INSERT INTO workflows(id, repository, mode, name, objective, task_type, role, slot, parent_id,
                         status, adapter_reference, worktree_path, terminal_handle, error,
                         queue_observer_enabled, issue_url, created_at, updated_at)
-                        VALUES (?, ?, 'orchestrated', ?, ?, ?, ?, ?, 'requested', NULL, NULL, NULL, NULL, 0, ?, ?, ?)
+                        VALUES (?, ?, 'orchestrated', ?, ?, ?, ?, ?, ?, 'requested', NULL, NULL, NULL, NULL, 0, ?, ?, ?)
                         """,
                         (
                             workflow_id,
                             str(repository.resolve()),
                             workflow_name,
                             objective,
+                            (TaskType.REVIEW if role == WorkflowRole.REVIEWER else task_type).value,
                             role.value,
                             slot,
                             parent_id,
@@ -479,6 +504,7 @@ class WorkflowStore:
         name: str,
         objective: str,
         *,
+        task_type: str | TaskType = TaskType.IMPLEMENTATION,
         allow_duplicate: bool = False,
         issue_url: str | None = None,
         max_review_cycles: int = 3,
@@ -487,8 +513,9 @@ class WorkflowStore:
         """Atomically create a root plan and claim its root for external startup."""
         try:
             mode = WorkflowMode(mode)
+            task_type = TaskType(task_type)
         except ValueError as exc:
-            raise ValueError("workflow mode is invalid") from exc
+            raise ValueError("workflow mode or task type is invalid") from exc
         if not name.strip() or not objective.strip():
             raise ValueError("workflow name and objective are required")
         if type(max_review_cycles) is not int or max_review_cycles < 1:
@@ -559,10 +586,10 @@ class WorkflowStore:
                     connection.execute(
                         """
                         INSERT INTO workflows(
-                            id, repository, mode, name, objective, role, slot, parent_id, status,
+                            id, repository, mode, name, objective, task_type, role, slot, parent_id, status,
                             adapter_reference, worktree_path, terminal_handle, error,
                             queue_observer_enabled, issue_url, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?, ?)
                         """,
                         (
                             workflow_id,
@@ -570,6 +597,7 @@ class WorkflowStore:
                             mode.value,
                             workflow_name,
                             objective,
+                            (TaskType.REVIEW if role == WorkflowRole.REVIEWER else task_type).value,
                             role.value,
                             slot,
                             parent_id,
@@ -1915,6 +1943,7 @@ class WorkflowStore:
         elif outcome is not None:
             raise ValueError("only reviewer readiness accepts an outcome")
         now = _now()
+        reviewed_sha = workflow.start_sha if workflow.role == WorkflowRole.REVIEWER else None
         readiness_id = str(uuid.uuid4())
         try:
             with self._connect() as connection:
@@ -1933,8 +1962,9 @@ class WorkflowStore:
                     """
                     INSERT INTO workflow_role_readiness(
                         id, root_manager_id, workflow_id, role, attempt, summary, outcome, blocked_reason,
-                        artifact_kind, artifact_sha256, artifact_content, created_at, consumed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        reviewed_sha, artifact_kind, artifact_sha256, artifact_content, created_at,
+                        consumed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         readiness_id,
@@ -1945,6 +1975,7 @@ class WorkflowStore:
                         summary.strip(),
                         outcome,
                         blocked_reason,
+                        reviewed_sha,
                         artifact_kind,
                         artifact_sha256,
                         artifact_content,
@@ -1966,6 +1997,7 @@ class WorkflowStore:
                 or existing.summary != summary.strip()
                 or existing.outcome != outcome
                 or existing.blocked_reason != blocked_reason
+                or existing.reviewed_sha != reviewed_sha
                 or existing.artifact_kind != artifact_kind
                 or existing.artifact_sha256 != artifact_sha256
                 or existing.artifact_content != artifact_content
@@ -1973,6 +2005,68 @@ class WorkflowStore:
                 raise ValueError("role readiness was already recorded with different details")
             return existing
         return self.role_readiness_for(workflow.id, attempt)
+
+    def record_continuation(
+        self,
+        workflow_id: str,
+        *,
+        expected_terminal_handle: str,
+        existing_sha: str,
+        dirty: bool,
+        artifacts: tuple[str, ...],
+        next_action: str,
+    ) -> ContinuationSnapshot:
+        """Persist the exact state from which continuation work resumes."""
+        workflow = self.get(workflow_id)
+        if workflow.task_type != TaskType.CONTINUATION:
+            raise ValueError("continuation state requires a continuation task")
+        if workflow.status != WorkflowStatus.RUNNING:
+            raise ValueError("only a running workflow can record continuation state")
+        if workflow.terminal_handle != expected_terminal_handle:
+            raise ValueError("workflow terminal changed before continuation state was recorded")
+        if not existing_sha.strip() or not next_action.strip():
+            raise ValueError("continuation SHA and next action are required")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflow_continuations(
+                    workflow_id, terminal_handle, existing_sha, dirty, artifacts_json,
+                    next_action, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_id) DO UPDATE SET
+                    terminal_handle=excluded.terminal_handle,
+                    existing_sha=excluded.existing_sha,
+                    dirty=excluded.dirty,
+                    artifacts_json=excluded.artifacts_json,
+                    next_action=excluded.next_action,
+                    recorded_at=excluded.recorded_at
+                """,
+                (
+                    workflow.id,
+                    expected_terminal_handle,
+                    existing_sha.strip(),
+                    int(dirty),
+                    json.dumps(list(artifacts)),
+                    next_action.strip(),
+                    now,
+                ),
+            )
+        snapshot = self.continuation_snapshot(workflow.id)
+        assert snapshot is not None
+        return snapshot
+
+    def continuation_snapshot(self, workflow_id: str) -> ContinuationSnapshot | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_continuations WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        values["dirty"] = bool(values["dirty"])
+        values["artifacts"] = tuple(json.loads(values.pop("artifacts_json")))
+        return ContinuationSnapshot(**values)
 
     def record_execution_result(
         self,
