@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage import configure_sqlite_connection, prepare_private_database
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 DATABASE_FILENAME = "flybridge.sqlite3"
 LEGACY_FILENAMES = ("workflows.sqlite3", "queue.sqlite3")
 
@@ -21,6 +21,27 @@ CREATE TABLE queue_dispatcher_control (
 """
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE workflow_execution_results (
+        workflow_id TEXT NOT NULL REFERENCES workflows(id),
+        attempt INTEGER NOT NULL CHECK(attempt > 0),
+        terminal_handle TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN (
+            'done', 'blocked', 'failed', 'question-waiting', 'runtime-error', 'result-missing'
+        )),
+        source TEXT NOT NULL CHECK(source IN ('agent', 'monitor')),
+        final INTEGER NOT NULL CHECK(final IN (0, 1)),
+        summary TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        sha TEXT,
+        artifacts_json TEXT NOT NULL,
+        validation_json TEXT NOT NULL,
+        unresolved_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workflow_id, attempt, terminal_handle)
+    )
+    """,
     """
     CREATE TABLE queue_dispatcher_control (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -702,7 +723,15 @@ def _migrate(connection: sqlite3.Connection, version: int) -> int:
         connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN pid INTEGER")
         connection.execute("ALTER TABLE queue_dispatcher_control ADD COLUMN process_identity TEXT")
         connection.execute("PRAGMA user_version = 9")
-        return 9
+        version = 9
+    if version == 9:
+        for statement in SCHEMA_STATEMENTS:
+            if "CREATE TABLE workflow_execution_results" in statement:
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        connection.execute("PRAGMA user_version = 10")
+        return 10
     return version
 
 

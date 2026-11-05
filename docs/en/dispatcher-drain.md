@@ -52,10 +52,11 @@ producer freeze is uncertain, preserve everything and defer migration. The new C
 cannot create this boundary for old binaries. Queued work, manual leases and pending
 results are not reasons to cancel or release them.
 
-The new schema is version 9. Version 8 retains the exact four-field intermediate
+The current schema is version 10. Version 8 retains the exact four-field intermediate
 control definition. Opening state with the isolated new CLI validates that definition
-and transactionally migrates versions 7/8 to 9; the incarnation fields are added only
-with a version increment. Unknown version-8 control definitions are rejected;
+and transactionally migrates versions 7/8 through 9 to 10; the incarnation fields and
+activation-bound execution result table are added only with version increments. An
+existing version-9 state receives only the result table. Unknown version-8 control definitions are rejected;
 older CLI binaries reject that upgraded schema. Therefore do not use the new CLI
 against live legacy state merely to inspect or experiment: first coordinate the
 producer freeze and version transition. After the legacy process has exited, retain

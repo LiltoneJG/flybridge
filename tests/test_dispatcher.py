@@ -578,11 +578,29 @@ def test_known_four_field_schema_eight_migrates_transactionally(tmp_path):
         connection.execute("PRAGMA user_version=8")
     migrated = ResourceQueue(tmp_path / "state")
     with migrated._connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         row = connection.execute("SELECT * FROM queue_dispatcher_control").fetchone()
         assert row["paused"] == 1 and row["instance"] == "old"
         assert row["pid"] is None and row["process_identity"] is None
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_execution_results'"
+        ).fetchone()
     assert migrated.inspect(manual.request_id)["status"] == "leased"
+
+
+def test_schema_nine_adds_only_execution_results_table(tmp_path):
+    _dispatcher, queue, _store, _runtime = _setup(tmp_path)
+    with queue._connect() as connection:
+        connection.execute("DROP TABLE workflow_execution_results")
+        connection.execute("PRAGMA user_version=9")
+
+    migrated = ResourceQueue(tmp_path / "state")
+
+    with migrated._connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_execution_results'"
+        ).fetchone()
 
 
 def test_unknown_schema_eight_control_rejected_without_mutation(tmp_path):

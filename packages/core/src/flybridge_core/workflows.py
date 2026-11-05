@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -212,6 +213,27 @@ class RoleReadinessView:
     artifact_sha256: str
     created_at: str
     consumed_at: str | None
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    workflow_id: str
+    run_id: str
+    role: str
+    attempt: int
+    terminal_handle: str
+    outcome: str
+    source: str
+    final: bool
+    summary: str
+    repository: str
+    sha: str | None
+    artifacts: tuple[str, ...]
+    validation: tuple[str, ...]
+    unresolved: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    current: bool
 
 
 class AdapterReferenceConflict(ValueError):
@@ -1951,6 +1973,176 @@ class WorkflowStore:
                 raise ValueError("role readiness was already recorded with different details")
             return existing
         return self.role_readiness_for(workflow.id, attempt)
+
+    def record_execution_result(
+        self,
+        workflow_id: str,
+        *,
+        expected_terminal_handle: str,
+        outcome: str,
+        source: str,
+        summary: str,
+        repository: str,
+        sha: str | None,
+        artifacts: tuple[str, ...] = (),
+        validation: tuple[str, ...] = (),
+        unresolved: tuple[str, ...] = (),
+        final: bool = True,
+    ) -> ExecutionResult:
+        """Record one activation-bound result, rejecting stale or conflicting reports."""
+        allowed = {
+            "done",
+            "blocked",
+            "failed",
+            "question-waiting",
+            "runtime-error",
+            "result-missing",
+        }
+        if outcome not in allowed:
+            raise ValueError("unsupported execution result outcome")
+        if source not in {"agent", "monitor"}:
+            raise ValueError("execution result source must be agent or monitor")
+        if outcome == "question-waiting" and final:
+            raise ValueError("question-waiting must be a non-final result")
+        if outcome != "question-waiting" and not final:
+            raise ValueError("only question-waiting may be non-final")
+        if not summary.strip() or "\n" in summary:
+            raise ValueError("execution result summary must be a non-empty single line")
+        if not repository.strip():
+            raise ValueError("execution result repository is required")
+        for label, values in (
+            ("artifact", artifacts),
+            ("validation", validation),
+            ("unresolved item", unresolved),
+        ):
+            if any(not value.strip() for value in values):
+                raise ValueError(f"execution result {label} values must be non-empty")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            workflow = connection.execute(
+                "SELECT id, run_id, role, attempt, terminal_handle, status FROM workflows "
+                "WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if workflow is None:
+                raise ValueError("workflow was not found")
+            if workflow["status"] != WorkflowStatus.RUNNING.value:
+                raise ValueError("execution results require a running workflow")
+            if (
+                not expected_terminal_handle
+                or workflow["terminal_handle"] != expected_terminal_handle
+            ):
+                raise ValueError("execution result belongs to a superseded activation")
+            attempt = int(workflow["attempt"])
+            payload = (
+                outcome,
+                source,
+                int(final),
+                summary.strip(),
+                repository.strip(),
+                sha,
+                json.dumps(list(artifacts), separators=(",", ":")),
+                json.dumps(list(validation), separators=(",", ":")),
+                json.dumps(list(unresolved), separators=(",", ":")),
+            )
+            existing = connection.execute(
+                "SELECT * FROM workflow_execution_results WHERE workflow_id = ? "
+                "AND attempt = ? AND terminal_handle = ?",
+                (workflow_id, attempt, expected_terminal_handle),
+            ).fetchone()
+            if existing is not None:
+                existing_payload = tuple(
+                    existing[key]
+                    for key in (
+                        "outcome",
+                        "source",
+                        "final",
+                        "summary",
+                        "repository",
+                        "sha",
+                        "artifacts_json",
+                        "validation_json",
+                        "unresolved_json",
+                    )
+                )
+                if existing_payload == payload:
+                    return self._execution_result_from_row(existing, workflow, current=True)
+                if bool(existing["final"]):
+                    raise ValueError("a final execution result is already recorded")
+                if not final:
+                    raise ValueError("question-waiting result is already recorded")
+                connection.execute(
+                    "UPDATE workflow_execution_results SET outcome=?, source=?, final=?, summary=?, "
+                    "repository=?, sha=?, artifacts_json=?, validation_json=?, unresolved_json=?, "
+                    "updated_at=? WHERE workflow_id=? AND attempt=? AND terminal_handle=?",
+                    (*payload, now, workflow_id, attempt, expected_terminal_handle),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO workflow_execution_results VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        workflow_id,
+                        attempt,
+                        expected_terminal_handle,
+                        *payload,
+                        now,
+                        now,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM workflow_execution_results WHERE workflow_id=? AND attempt=? "
+                "AND terminal_handle=?",
+                (workflow_id, attempt, expected_terminal_handle),
+            ).fetchone()
+            assert row is not None
+            return self._execution_result_from_row(row, workflow, current=True)
+
+    def execution_result(self, workflow_id: str) -> ExecutionResult | None:
+        with self._connect() as connection:
+            workflow = connection.execute(
+                "SELECT id, run_id, role, attempt, terminal_handle, status FROM workflows "
+                "WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if workflow is None:
+                raise ValueError("workflow was not found")
+            row = connection.execute(
+                "SELECT * FROM workflow_execution_results WHERE workflow_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        current = (
+            int(row["attempt"]) == int(workflow["attempt"])
+            and row["terminal_handle"] == workflow["terminal_handle"]
+            and workflow["status"] == WorkflowStatus.RUNNING.value
+        )
+        return self._execution_result_from_row(row, workflow, current=current)
+
+    @staticmethod
+    def _execution_result_from_row(row, workflow, *, current: bool) -> ExecutionResult:
+        return ExecutionResult(
+            workflow_id=str(row["workflow_id"]),
+            run_id=str(workflow["run_id"]),
+            role=str(workflow["role"]),
+            attempt=int(row["attempt"]),
+            terminal_handle=str(row["terminal_handle"]),
+            outcome=str(row["outcome"]),
+            source=str(row["source"]),
+            final=bool(row["final"]),
+            summary=str(row["summary"]),
+            repository=str(row["repository"]),
+            sha=None if row["sha"] is None else str(row["sha"]),
+            artifacts=tuple(json.loads(str(row["artifacts_json"]))),
+            validation=tuple(json.loads(str(row["validation_json"]))),
+            unresolved=tuple(json.loads(str(row["unresolved_json"]))),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            current=current,
+        )
 
     def role_readiness_for(self, workflow_id: str, attempt: int) -> RoleReadiness:
         with self._connect() as connection:

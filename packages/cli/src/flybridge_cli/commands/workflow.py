@@ -886,12 +886,52 @@ def _apply_watchdog(
     for record in records:
         if record.status != WorkflowStatus.RUNNING or record.id in waiting:
             continue
+        if service.store.has_unconsumed_readiness(record.id):
+            continue
         if record.mode == WorkflowMode.SINGLE and batches.single_reported(
             record.id, record.terminal_handle
         ):
             continue
-        if service.store.has_unconsumed_readiness(record.id):
+        execution_result = service.store.execution_result(record.id)
+        if execution_result is not None and execution_result.current:
+            if (
+                execution_result.outcome == "result-missing"
+                and execution_result.source == "monitor"
+            ):
+                blocked = _timeout_block(service, client, record, "result-missing")
+                blocked["result"] = asdict(execution_result)
+                return blocked
+            if execution_result.outcome == "question-waiting":
+                return {
+                    "action": "question-waiting",
+                    "workflow_id": record.id,
+                    "result": asdict(execution_result),
+                }
+            if execution_result.final:
+                if record.mode == WorkflowMode.SINGLE:
+                    return {
+                        "action": "result-received",
+                        "workflow_id": record.id,
+                        "outcome": execution_result.outcome,
+                        "result": asdict(execution_result),
+                    }
+                continue
+        # A replayable launch/rework gap has no current process allocation yet;
+        # coordinator recovery, not missing-result reconciliation, owns it.
+        if not record.terminal_handle:
             continue
+        if _owner_terminal_state(record, client) == "invalid":
+            result = service.record_execution_result(
+                record.id,
+                expected_terminal_handle=record.terminal_handle or "",
+                outcome="result-missing",
+                source="monitor",
+                summary="Owner process exited without a final result.",
+                unresolved=("No final execution result was received.",),
+            )
+            blocked = _timeout_block(service, client, record, "result-missing")
+            blocked["result"] = asdict(result)
+            return blocked
         age = _age_seconds(record.activated_at)
         if age is None:
             age = _age_seconds(record.updated_at)
@@ -1546,6 +1586,11 @@ def handle(args: argparse.Namespace) -> int:
                     "workflow": asdict(workflow),
                     "run": run,
                     "blocker": blocker,
+                    "execution_result": (
+                        None
+                        if (execution_result := store.execution_result(workflow.id)) is None
+                        else asdict(execution_result)
+                    ),
                     "single_report": BatchStore(config.state_dir).single_report(workflow.id),
                     "owner_agent_state": _owner_terminal_state(workflow, client),
                     "prompt_delivery": {
@@ -1663,9 +1708,32 @@ def handle(args: argparse.Namespace) -> int:
         batches.report_single(
             args.workflow_id, args.outcome, args.summary, final=not args.checkpoint
         )
+        reported_workflow = store.get(args.workflow_id)
+        if not args.checkpoint and reported_workflow.terminal_handle:
+            service.record_execution_result(
+                args.workflow_id,
+                expected_terminal_handle=reported_workflow.terminal_handle,
+                outcome=args.outcome,
+                source="agent",
+                summary=args.summary,
+                validation=(args.summary,) if args.outcome == "done" else (),
+                unresolved=(args.summary,) if args.outcome == "blocked" else (),
+            )
         if batches.active_batches_for_workflow(args.workflow_id):
             _maintain_batch_watchers(config, _adapter(config), args.workflow_id)
         print(json.dumps({"workflow_id": args.workflow_id, "outcome": args.outcome}))
+        return 0
+    if args.workflow_command == "result-report":
+        result = service.record_execution_result(
+            args.workflow_id,
+            expected_terminal_handle=args.terminal_handle,
+            outcome=args.outcome,
+            source="agent",
+            summary=args.summary,
+            validation=tuple(args.validation),
+            unresolved=tuple(args.unresolved),
+        )
+        print(json.dumps({"result": asdict(result)}, indent=2))
         return 0
     if args.workflow_command == "batch":
         batches = BatchStore(config.state_dir)
